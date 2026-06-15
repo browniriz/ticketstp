@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Заявки</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #0f1115);
+    --bg-soft: var(--tg-theme-secondary-bg-color, #1a1d24);
+    --surface: #20242d;
+    --surface-2: #272c37;
+    --text: var(--tg-theme-text-color, #f2f4f8);
+    --muted: var(--tg-theme-hint-color, #8b93a3);
+    --accent: var(--tg-theme-button-color, #3a8dff);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --line: rgba(255,255,255,0.08);
+
+    --red: #ef5350;
+    --amber: #f2b01e;
+    --green: #2ecc71;
+
+    --radius: 16px;
+    --radius-sm: 10px;
+    --space: 16px;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.45;
+    padding-bottom: 40px;
+  }
+
+  /* ---------- Header ---------- */
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+    padding: 14px var(--space) 10px;
+  }
+  .topbar h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+  .role-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-top: 4px; font-size: 12px; color: var(--muted);
+  }
+  .role-chip b { color: var(--text); font-weight: 600; }
+
+  /* ---------- Tabs ---------- */
+  .tabs {
+    display: flex; gap: 6px; margin-top: 12px;
+    background: var(--bg-soft); padding: 4px; border-radius: 12px;
+  }
+  .tab {
+    flex: 1; text-align: center; padding: 9px 8px; border-radius: 9px;
+    font-size: 13px; font-weight: 600; color: var(--muted);
+    background: transparent; border: none; cursor: pointer;
+    transition: background var(--ease) .25s, color var(--ease) .25s;
+  }
+  .tab.active { background: var(--surface-2); color: var(--text); }
+
+  /* ---------- Layout ---------- */
+  .screen { padding: var(--space); display: none; }
+  .screen.active { display: block; animation: fade .3s var(--ease); }
+  @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  .section-title {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin: 4px 2px 12px;
+  }
+
+  /* ---------- Form ---------- */
+  .field { margin-bottom: 14px; }
+  .field label {
+    display: block; font-size: 12px; font-weight: 600;
+    color: var(--muted); margin-bottom: 6px; padding-left: 2px;
+  }
+  .control {
+    width: 100%; padding: 13px 14px; font-size: 15px;
+    color: var(--text); background: var(--surface);
+    border: 1px solid var(--line); border-radius: var(--radius-sm);
+    outline: none; transition: border-color .2s, background .2s;
+    appearance: none; -webkit-appearance: none; font-family: inherit;
+  }
+  .control:focus { border-color: var(--accent); background: var(--surface-2); }
+  .control::placeholder { color: var(--muted); opacity: .65; }
+  select.control {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%238b93a3' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 14px center;
+    padding-right: 36px;
+  }
+  select.control:disabled { opacity: .5; }
+  textarea.control { resize: vertical; min-height: 110px; line-height: 1.5; }
+
+  .submit {
+    width: 100%; padding: 15px; margin-top: 6px; font-size: 16px; font-weight: 700;
+    color: var(--accent-text); background: var(--accent);
+    border: none; border-radius: var(--radius-sm); cursor: pointer;
+    transition: opacity .2s, transform .1s;
+  }
+  .submit:disabled { opacity: .35; cursor: not-allowed; }
+  .submit:active:not(:disabled) { transform: scale(.985); }
+
+  /* ---------- Ticket cards ---------- */
+  .cards { display: flex; flex-direction: column; gap: 10px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-left: 4px solid var(--muted); border-radius: var(--radius);
+    padding: 14px; cursor: pointer;
+    transition: transform .12s var(--ease), background .2s;
+  }
+  .card:active { transform: scale(.99); }
+  .card.s-new   { border-left-color: var(--red);   background: linear-gradient(90deg, color-mix(in srgb, var(--red) 9%, var(--surface)), var(--surface) 55%); }
+  .card.s-work  { border-left-color: var(--amber); background: linear-gradient(90deg, color-mix(in srgb, var(--amber) 9%, var(--surface)), var(--surface) 55%); }
+  .card.s-pause { border-left-color: var(--amber); }
+  .card.s-done  { border-left-color: var(--green); background: linear-gradient(90deg, color-mix(in srgb, var(--green) 8%, var(--surface)), var(--surface) 55%); }
+
+  .card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .ticket-no { font-weight: 700; font-size: 15px; letter-spacing: .5px; font-variant-numeric: tabular-nums; }
+  .badge {
+    font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px;
+    display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  }
+  .badge::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .badge.s-new   { color: var(--red);   background: color-mix(in srgb, var(--red) 16%, transparent); }
+  .badge.s-work  { color: var(--amber); background: color-mix(in srgb, var(--amber) 16%, transparent); }
+  .badge.s-pause { color: var(--amber); background: color-mix(in srgb, var(--amber) 16%, transparent); }
+  .badge.s-done  { color: var(--green); background: color-mix(in srgb, var(--green) 16%, transparent); }
+
+  .card-meta { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 10px; }
+  .card-desc { margin-top: 8px; font-size: 14px; color: var(--text);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .card-timer { margin-top: 8px; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--amber); }
+  .card.s-done .card-timer { color: var(--green); }
+
+  /* ---------- Detail overlay ---------- */
+  .overlay {
+    position: fixed; inset: 0; z-index: 50; display: none;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(2px);
+    align-items: flex-end; justify-content: center;
+  }
+  .overlay.open { display: flex; animation: fade .2s var(--ease); }
+  .sheet {
+    width: 100%; max-width: 560px; background: var(--bg-soft);
+    border-radius: 22px 22px 0 0; padding: 8px 18px 26px;
+    max-height: 90vh; overflow-y: auto; animation: slideup .3s var(--ease);
+  }
+  @keyframes slideup { from { transform: translateY(100%); } to { transform: none; } }
+  .grabber { width: 40px; height: 4px; border-radius: 999px; background: var(--line); margin: 6px auto 14px; }
+
+  .detail-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  .detail-head .ticket-no { font-size: 22px; }
+  .detail-row { display: flex; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+  .detail-row .k { color: var(--muted); flex: 0 0 130px; }
+  .detail-row .v { color: var(--text); flex: 1; font-weight: 500; }
+  .detail-desc { margin: 14px 0; padding: 14px; background: var(--surface);
+    border-radius: var(--radius-sm); font-size: 15px; line-height: 1.5; white-space: pre-wrap; }
+
+  .timer-box { text-align: center; margin: 18px 0 8px; }
+  .timer-box .t { font-size: 40px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: 1px; }
+  .timer-box .l { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+  .timer-box.running .t { color: var(--amber); }
+  .timer-box.done .t { color: var(--green); }
+
+  .actions { display: flex; gap: 10px; margin-top: 18px; }
+  .btn {
+    flex: 1; padding: 14px; font-size: 15px; font-weight: 700; border: none;
+    border-radius: var(--radius-sm); cursor: pointer; color: #fff;
+    transition: transform .1s, opacity .2s; font-family: inherit;
+  }
+  .btn:active { transform: scale(.98); }
+  .btn-take   { background: var(--accent); color: var(--accent-text); }
+  .btn-pause  { background: var(--surface-2); color: var(--text); border: 1px solid var(--line); }
+  .btn-resume { background: var(--amber); color: #1a1400; }
+  .btn-finish { background: var(--green); color: #04210f; }
+
+  /* ---------- States ---------- */
+  .empty { text-align: center; color: var(--muted); padding: 48px 20px; font-size: 14px; }
+  .empty .icon { font-size: 34px; opacity: .5; display: block; margin-bottom: 10px; }
+  .toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(20px);
+    background: var(--surface-2); color: var(--text); padding: 12px 20px; border-radius: 12px;
+    font-size: 14px; font-weight: 600; box-shadow: 0 8px 30px rgba(0,0,0,.4);
+    opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s; z-index: 100;
+    border: 1px solid var(--line);
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.err { border-color: var(--red); color: var(--red); }
+
+  .loader { text-align: center; padding: 40px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1 id="appTitle">Заявки</h1>
+  <div class="role-chip" id="roleChip"></div>
+  <div class="tabs" id="tabs"></div>
+</div>
+
+<!-- ===== Employee: new ticket ===== -->
+<section class="screen" id="screen-new">
+  <form id="ticketForm" autocomplete="off">
+    <div class="field">
+      <label>Тип заявки</label>
+      <select class="control" id="f-type" required>
+        <option value="" disabled selected>Выберите тип</option>
+        <option>Ломбард</option><option>Скупка</option><option>Касса</option><option>Ошибка</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Город</label>
+      <select class="control" id="f-city" required>
+        <option value="" disabled selected>Выберите город</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Офис</label>
+      <select class="control" id="f-office" required disabled>
+        <option value="" disabled selected>Сначала выберите город</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Имя отправителя</label>
+      <input class="control" id="f-name" type="text" placeholder="Введите ваше имя" required />
+    </div>
+    <div class="field">
+      <label>Описание проблемы</label>
+      <textarea class="control" id="f-desc" placeholder="Введите описание проблемы" required></textarea>
+    </div>
+    <button class="submit" id="submitBtn" type="submit" disabled>Отправить заявку</button>
+  </form>
+</section>
+
+<!-- ===== Employee: my tickets ===== -->
+<section class="screen" id="screen-mine">
+  <div class="section-title">Мои заявки</div>
+  <div class="cards" id="mineList"><div class="loader">Загрузка…</div></div>
+</section>
+
+<!-- ===== Admin: active tickets ===== -->
+<section class="screen" id="screen-admin">
+  <div class="section-title">Активные заявки</div>
+  <div class="cards" id="adminList"><div class="loader">Загрузка…</div></div>
+</section>
+
+<!-- ===== Admin: history ===== -->
+<section class="screen" id="screen-history">
+  <div class="section-title">История решённых заявок</div>
+  <div class="cards" id="historyList"><div class="loader">Загрузка…</div></div>
+</section>
+
+<!-- ===== Detail overlay ===== -->
+<div class="overlay" id="overlay">
+  <div class="sheet" id="sheet"><div class="grabber"></div><div id="detailBody"></div></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ============================ CONFIG ============================
+// Вставь сюда URL веб-приложения Apps Script (Deploy → Web app).
+var API_URL = 'https://script.google.com/macros/s/AKfycbwJVW25R_xLRM_BPiUjvEC0BAS9vf-KKMaFlGm_O8jJAn8myOiFjrlp-U5TJ6ETzcb6YQ/exec';
+
+// ============================ DATA ============================
+var OFFICES = {
+  'Магнитогорск':  ['КМ68', 'КМ142', 'КМ198', 'КМ222', 'МГН5', 'МГН6'],
+  'Челябинск':     ['К3', 'Че4', 'Че2', 'ЧеЦ'],
+  'Екатеринбург':  ['ЕКБ1', 'ЕКБ2', 'ЕКБ4', 'ЕКБ5', 'ЕКБ7', 'ЕКБ8', 'ЕКБ9', 'ЕКБ10', 'ЕКБ11'],
+  'Нижний Тагил':  ['НТ1'],
+  'Пермь':         ['П1', 'П2', 'П4', 'П5'],
+  'Омск':          ['ОМ1', 'ОМ2', 'ОМ3', 'ОМ4'],
+  'Красноярск':    ['КР1', 'КР2'],
+  'Барнаул':       ['БР1', 'БР2', 'БР3'],
+  'Кемерово':      ['КМР1']
+};
+
+var STATUS_CLASS = { 'создана': 's-new', 'в работе': 's-work', 'на паузе': 's-pause', 'решена': 's-done' };
+var STATUS_LABEL = { 'создана': 'Создана', 'в работе': 'В работе', 'на паузе': 'На паузе', 'решена': 'Решена' };
+
+// ============================ STATE ============================
+var tg = window.Telegram ? window.Telegram.WebApp : null;
+var USER = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) ? tg.initDataUnsafe.user : null;
+var TG_ID = USER ? String(USER.id) : '';
+var ROLE = 'сотрудник';
+var USER_NAME = USER ? [USER.first_name, USER.last_name].filter(Boolean).join(' ') : '';
+
+var currentView = '';
+var pollTimer = null;
+var tickTimer = null;
+var ticketCache = {};          // number -> ticket
+var cacheFetchedAt = 0;        // performance.now() of last fetch
+var openTicketNo = null;       // number of ticket open in overlay
+
+// ============================ API ============================
+function api(action, payload) {
+  payload = payload || {};
+  payload.action = action;
+  payload.tg_id = TG_ID;
+  if (!API_URL) return Promise.reject(new Error('API_URL не задан в index.html'));
+  return fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+      if (!res.success) throw new Error(res.error || 'Ошибка сервера');
+      return res.data;
+    });
+}
+
+// ============================ BOOT ============================
+function boot() {
+  if (tg) { tg.ready(); tg.expand(); }
+  api('getRole', {})
+    .then(function (data) {
+      ROLE = data.role || 'сотрудник';
+      if (data.name) USER_NAME = data.name;
+      buildUI();
+    })
+    .catch(function (e) {
+      // не блокируем — работаем как сотрудник
+      buildUI();
+      if (API_URL) toast(e.message, true);
+    });
+}
+
+function buildUI() {
+  var roleChip = document.getElementById('roleChip');
+  var prefill = document.getElementById('f-name');
+  if (USER_NAME && prefill && !prefill.value) prefill.value = USER_NAME;
+
+  var tabsEl = document.getElementById('tabs');
+  if (ROLE === 'админ') {
+    document.getElementById('appTitle').textContent = 'Панель заявок';
+    roleChip.innerHTML = 'Режим: <b>Администратор</b>';
+    tabsEl.innerHTML = '';
+    addTab('admin', 'Заявки');
+    addTab('history', 'История');
+    addTab('new', 'Создать');
+    switchView('admin');
+  } else {
+    roleChip.innerHTML = 'Сотрудник' + (USER_NAME ? ': <b>' + esc(USER_NAME) + '</b>' : '');
+    tabsEl.innerHTML = '';
+    addTab('new', 'Новая заявка');
+    addTab('mine', 'Мои заявки');
+    switchView('new');
+  }
+  initForm();
+}
+
+function addTab(view, label) {
+  var b = document.createElement('button');
+  b.className = 'tab'; b.textContent = label; b.dataset.view = view;
+  b.onclick = function () { switchView(view); };
+  document.getElementById('tabs').appendChild(b);
+}
+
+function switchView(view) {
+  currentView = view;
+  var screens = document.querySelectorAll('.screen');
+  for (var i = 0; i < screens.length; i++) screens[i].classList.remove('active');
+  var el = document.getElementById('screen-' + view);
+  if (el) el.classList.add('active');
+  var tabs = document.querySelectorAll('.tab');
+  for (var j = 0; j < tabs.length; j++) tabs[j].classList.toggle('active', tabs[j].dataset.view === view);
+
+  stopPolling();
+  if (view === 'mine')    { refreshMine(); startPolling(refreshMine); }
+  if (view === 'admin')   { refreshAdmin(); startPolling(refreshAdmin); }
+  if (view === 'history') { refreshHistory(); }
+}
+
+function startPolling(fn) { stopPolling(); pollTimer = setInterval(fn, 4000); }
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+// ============================ FORM ============================
+function initForm() {
+  var city = document.getElementById('f-city');
+  if (city.options.length <= 1) {
+    Object.keys(OFFICES).forEach(function (c) {
+      var o = document.createElement('option'); o.value = c; o.textContent = c; city.appendChild(o);
+    });
+  }
+  var office = document.getElementById('f-office');
+  city.onchange = function () {
+    office.innerHTML = '<option value="" disabled selected>Выберите офис</option>';
+    (OFFICES[city.value] || []).forEach(function (of) {
+      var o = document.createElement('option'); o.value = of; o.textContent = of; office.appendChild(o);
+    });
+    office.disabled = false;
+    validateForm();
+  };
+
+  ['f-type', 'f-office', 'f-name', 'f-desc'].forEach(function (id) {
+    document.getElementById(id).addEventListener('input', validateForm);
+    document.getElementById(id).addEventListener('change', validateForm);
+  });
+
+  document.getElementById('ticketForm').addEventListener('submit', submitTicket);
+}
+
+function validateForm() {
+  var ok = val('f-type') && val('f-city') && val('f-office') && val('f-name') && val('f-desc');
+  document.getElementById('submitBtn').disabled = !ok;
+}
+function val(id) { return document.getElementById(id).value.trim(); }
+
+function submitTicket(e) {
+  e.preventDefault();
+  var btn = document.getElementById('submitBtn');
+  btn.disabled = true; btn.textContent = 'Отправка…';
+  api('createTicket', {
+    type: val('f-type'), city: val('f-city'), office: val('f-office'),
+    name: val('f-name'), description: val('f-desc')
+  }).then(function (data) {
+    toast('Заявка ' + data.ticket.number + ' создана');
+    document.getElementById('ticketForm').reset();
+    document.getElementById('f-office').disabled = true;
+    if (USER_NAME) document.getElementById('f-name').value = USER_NAME;
+    btn.textContent = 'Отправить заявку';
+    if (ROLE !== 'админ') switchView('mine');
+  }).catch(function (err) {
+    toast(err.message, true);
+    btn.disabled = false; btn.textContent = 'Отправить заявку';
+  });
+}
+
+// ============================ LISTS ============================
+function refreshMine() {
+  api('getMyTickets', {}).then(function (d) { renderList('mineList', d.tickets, false); })
+    .catch(function (e) { listError('mineList', e); });
+}
+function refreshAdmin() {
+  api('getTickets', {}).then(function (d) { renderList('adminList', d.tickets, true); })
+    .catch(function (e) { listError('adminList', e); });
+}
+function refreshHistory() {
+  api('getHistory', {}).then(function (d) { renderList('historyList', d.tickets, true); })
+    .catch(function (e) { listError('historyList', e); });
+}
+
+function listError(id, e) {
+  document.getElementById(id).innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+}
+
+function renderList(containerId, tickets, isAdmin) {
+  cacheFetchedAt = performance.now();
+  tickets.forEach(function (t) { ticketCache[t.number] = t; });
+
+  var c = document.getElementById(containerId);
+  if (!tickets.length) {
+    var msg = containerId === 'historyList' ? 'Пока нет решённых заявок'
+            : containerId === 'adminList'  ? 'Активных заявок нет'
+            : 'У вас пока нет заявок';
+    c.innerHTML = '<div class="empty"><span class="icon">📭</span>' + msg + '</div>';
+    return;
+  }
+  c.innerHTML = tickets.map(function (t) { return cardHTML(t); }).join('');
+  var cards = c.querySelectorAll('.card');
+  for (var i = 0; i < cards.length; i++) {
+    (function (card) { card.onclick = function () { openDetail(card.dataset.no); }; })(cards[i]);
+  }
+  // если открыта карточка из этого списка — обновим её
+  if (openTicketNo && ticketCache[openTicketNo]) renderDetail(ticketCache[openTicketNo]);
+}
+
+function cardHTML(t) {
+  var cls = STATUS_CLASS[t.status] || '';
+  var timer = '';
+  if (t.status === 'в работе' || t.status === 'на паузе') {
+    timer = '<div class="card-timer" data-timer="' + t.number + '">' + fmt(liveElapsed(t)) + '</div>';
+  } else if (t.status === 'решена') {
+    timer = '<div class="card-timer">⏱ ' + fmt(t.elapsedSeconds) + '</div>';
+  }
+  return '' +
+    '<div class="card ' + cls + '" data-no="' + esc(t.number) + '">' +
+      '<div class="card-top">' +
+        '<span class="ticket-no">' + esc(t.number) + '</span>' +
+        '<span class="badge ' + cls + '">' + (STATUS_LABEL[t.status] || t.status) + '</span>' +
+      '</div>' +
+      '<div class="card-meta">' +
+        '<span>' + esc(t.type) + '</span>' +
+        '<span>' + esc(t.city) + ' · ' + esc(t.office) + '</span>' +
+        '<span>' + dateShort(t.createdAt) + '</span>' +
+      '</div>' +
+      '<div class="card-desc">' + esc(t.description) + '</div>' +
+      timer +
+    '</div>';
+}
+
+// ============================ DETAIL ============================
+function openDetail(no) {
+  openTicketNo = no;
+  var t = ticketCache[no];
+  if (!t) return;
+  renderDetail(t);
+  document.getElementById('overlay').classList.add('open');
+}
+
+function closeDetail() {
+  openTicketNo = null;
+  document.getElementById('overlay').classList.remove('open');
+}
+
+function renderDetail(t) {
+  var isAdmin = ROLE === 'админ';
+  var cls = STATUS_CLASS[t.status] || '';
+  var running = t.status === 'в работе';
+  var timerCls = running ? 'running' : (t.status === 'решена' ? 'done' : '');
+
+  var actions = '';
+  if (isAdmin) {
+    if (t.status === 'создана') {
+      actions = '<button class="btn btn-take" onclick="act(\'takeTicket\',\'' + t.number + '\')">Взять в работу</button>';
+    } else if (t.status === 'в работе') {
+      actions =
+        '<button class="btn btn-pause" onclick="act(\'pauseTicket\',\'' + t.number + '\')">Пауза</button>' +
+        '<button class="btn btn-finish" onclick="act(\'finishTicket\',\'' + t.number + '\')">Завершить</button>';
+    } else if (t.status === 'на паузе') {
+      actions =
+        '<button class="btn btn-resume" onclick="act(\'resumeTicket\',\'' + t.number + '\')">Продолжить</button>' +
+        '<button class="btn btn-finish" onclick="act(\'finishTicket\',\'' + t.number + '\')">Завершить</button>';
+    }
+  }
+
+  var showTimer = t.status !== 'создана';
+  var timerLabel = t.status === 'решена' ? 'Затраченное время' : 'Время в работе';
+
+  document.getElementById('detailBody').innerHTML = '' +
+    '<div class="detail-head">' +
+      '<span class="ticket-no">' + esc(t.number) + '</span>' +
+      '<span class="badge ' + cls + '">' + (STATUS_LABEL[t.status] || t.status) + '</span>' +
+    '</div>' +
+    row('Создана', dateFull(t.createdAt)) +
+    row('Тип', esc(t.type)) +
+    row('Город / офис', esc(t.city) + ' · ' + esc(t.office)) +
+    row('Отправитель', esc(t.senderName)) +
+    (t.adminName ? row('Исполнитель', esc(t.adminName)) : '') +
+    (t.status === 'решена' && t.resolvedAt ? row('Решена', dateFull(t.resolvedAt)) : '') +
+    '<div class="detail-desc">' + esc(t.description) + '</div>' +
+    (showTimer ?
+      '<div class="timer-box ' + timerCls + '">' +
+        '<div class="t" data-detail-timer="' + t.number + '">' + fmt(liveElapsed(t)) + '</div>' +
+        '<div class="l">' + timerLabel + '</div>' +
+      '</div>' : '') +
+    (actions ? '<div class="actions">' + actions + '</div>' : '');
+}
+
+function row(k, v) { return '<div class="detail-row"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'; }
+
+function act(action, number) {
+  api(action, { number: number, name: USER_NAME }).then(function (d) {
+    ticketCache[d.ticket.number] = d.ticket;
+    cacheFetchedAt = performance.now();
+    renderDetail(d.ticket);
+    if (currentView === 'admin') refreshAdmin();
+    if (currentView === 'history') refreshHistory();
+    if (action === 'finishTicket') { toast('Заявка ' + number + ' решена'); setTimeout(closeDetail, 700); }
+  }).catch(function (e) { toast(e.message, true); });
+}
+
+// ============================ LIVE TIMER ============================
+// Для бегущих заявок прибавляем секунды, прошедшие с момента запроса.
+function liveElapsed(t) {
+  if (t.status !== 'в работе' || !t.isRunning) return t.elapsedSeconds;
+  var since = Math.floor((performance.now() - cacheFetchedAt) / 1000);
+  return t.elapsedSeconds + Math.max(0, since);
+}
+
+function tickTimers() {
+  var els = document.querySelectorAll('[data-timer]');
+  els.forEach(function (el) {
+    var t = ticketCache[el.getAttribute('data-timer')];
+    if (t) el.textContent = fmt(liveElapsed(t));
+  });
+  var d = document.querySelector('[data-detail-timer]');
+  if (d) {
+    var dt = ticketCache[d.getAttribute('data-detail-timer')];
+    if (dt) d.textContent = fmt(liveElapsed(dt));
+  }
+}
+
+// ============================ UTILS ============================
+function fmt(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  function p(n) { return ('0' + n).slice(-2); }
+  return p(h) + ':' + p(m) + ':' + p(s);
+}
+function dateFull(iso) {
+  if (!iso) return '—';
+  var d = new Date(iso);
+  return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function dateShort(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function toast(msg, isErr) {
+  var el = document.getElementById('toast');
+  el.textContent = msg; el.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(el._t); el._t = setTimeout(function () { el.className = 'toast'; }, 2800);
+}
+
+// ============================ INIT ============================
+document.getElementById('overlay').addEventListener('click', function (e) {
+  if (e.target === this) closeDetail();
+});
+tickTimer = setInterval(tickTimers, 1000);
+boot();
+</script>
+</body>
+</html>
