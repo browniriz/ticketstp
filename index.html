@@ -330,6 +330,8 @@ var openTicketNo = null;       // number of ticket open in overlay
 var viewTickets = [];          // последний показанный список (для оптимистичной перерисовки)
 var viewContainerId = '';      // контейнер текущего списка
 var pendingImage = '';         // dataURL прикреплённого к новой заявке скриншота
+var lastDetailNo = null;       // для какой заявки последний раз рисовали детали
+var lastDetailSig = '';        // сигнатура состояния заявки (чтобы не перерисовывать зря)
 
 // ============================ API ============================
 function api(action, payload) {
@@ -551,8 +553,17 @@ function renderList(containerId, tickets, isAdmin) {
   viewTickets = tickets;
   viewContainerId = containerId;
   paintList(containerId, tickets);
-  // если открыта карточка из этого списка — обновим её
-  if (openTicketNo && ticketCache[openTicketNo]) renderDetail(ticketCache[openTicketNo]);
+  // Перерисовываем открытую карточку только если её состояние реально изменилось,
+  // иначе опрос каждые 4с стирал бы открытую панель передачи/прикрепления.
+  if (openTicketNo && ticketCache[openTicketNo]) {
+    var ot = ticketCache[openTicketNo];
+    if (openTicketNo !== lastDetailNo || detailSig(ot) !== lastDetailSig) renderDetail(ot);
+  }
+}
+
+// Сигнатура значимого состояния заявки (без elapsedSeconds — таймер тикает отдельно).
+function detailSig(t) {
+  return [t.status, t.adminId, t.adminName, t.screenshotUrl, t.idleSeconds, t.resolvedAt].join('|');
 }
 
 // Чистая отрисовка списка из массива (без сети) — для оптимистичных обновлений.
@@ -668,6 +679,9 @@ function renderDetail(t) {
     (secondary ? '<div class="actions secondary">' + secondary + '</div>' : '') +
     '<input type="file" id="detail-image" accept="image/*" style="display:none" onchange="onDetailImage(\'' + t.number + '\')" />' +
     '<div id="transferPanel"></div>';
+
+  lastDetailNo = t.number;
+  lastDetailSig = detailSig(t);
 }
 
 function shotHTML(t) {
