@@ -287,10 +287,18 @@ var STATUS_LABEL = { 'создана': 'Создана', 'в работе': 'В 
 
 // ============================ STATE ============================
 var tg = window.Telegram ? window.Telegram.WebApp : null;
-var USER = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) ? tg.initDataUnsafe.user : null;
-var TG_ID = USER ? String(USER.id) : '';
+var USER = null;
+var TG_ID = '';
 var ROLE = 'сотрудник';
-var USER_NAME = USER ? [USER.first_name, USER.last_name].filter(Boolean).join(' ') : '';
+var USER_NAME = '';
+
+function readUser() {
+  if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
+    USER = tg.initDataUnsafe.user;
+    TG_ID = String(USER.id);
+    USER_NAME = [USER.first_name, USER.last_name].filter(Boolean).join(' ');
+  }
+}
 
 var currentView = '';
 var pollTimer = null;
@@ -316,6 +324,7 @@ function api(action, payload) {
 // ============================ BOOT ============================
 function boot() {
   if (tg) { tg.ready(); tg.expand(); }
+  readUser();
   api('getRole', {})
     .then(function (data) {
       ROLE = data.role || 'сотрудник';
@@ -337,14 +346,14 @@ function buildUI() {
   var tabsEl = document.getElementById('tabs');
   if (ROLE === 'админ') {
     document.getElementById('appTitle').textContent = 'Панель заявок';
-    roleChip.innerHTML = 'Режим: <b>Администратор</b>';
+    roleChip.innerHTML = 'Режим: <b>Администратор</b> · id ' + (TG_ID || '—');
     tabsEl.innerHTML = '';
     addTab('admin', 'Заявки');
     addTab('history', 'История');
     addTab('new', 'Создать');
     switchView('admin');
   } else {
-    roleChip.innerHTML = 'Сотрудник' + (USER_NAME ? ': <b>' + esc(USER_NAME) + '</b>' : '');
+    roleChip.innerHTML = 'Сотрудник' + (USER_NAME ? ': <b>' + esc(USER_NAME) + '</b>' : '') + ' · id ' + (TG_ID || '—');
     tabsEl.innerHTML = '';
     addTab('new', 'Новая заявка');
     addTab('mine', 'Мои заявки');
