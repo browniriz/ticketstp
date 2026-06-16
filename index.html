@@ -353,7 +353,14 @@ function buildUI() {
     addTab('new', 'Создать');
     switchView('admin');
   } else {
-    roleChip.innerHTML = 'Сотрудник' + (USER_NAME ? ': <b>' + esc(USER_NAME) + '</b>' : '') + ' · id ' + (TG_ID || '—');
+    var dbg = '';
+    if (!TG_ID) {
+      var raw = tg ? (tg.initData || '') : '';
+      dbg = '<br><span style="font-size:10px;opacity:.7">tg:' + (tg ? 'y' : 'n') +
+            ' · ' + (tg ? tg.platform : '?') + ' · v' + (tg ? tg.version : '?') +
+            ' · initData:' + raw.length + '</span>';
+    }
+    roleChip.innerHTML = 'Сотрудник' + (USER_NAME ? ': <b>' + esc(USER_NAME) + '</b>' : '') + ' · id ' + (TG_ID || '—') + dbg;
     tabsEl.innerHTML = '';
     addTab('new', 'Новая заявка');
     addTab('mine', 'Мои заявки');
