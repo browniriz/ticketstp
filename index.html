@@ -306,6 +306,8 @@ var tickTimer = null;
 var ticketCache = {};          // number -> ticket
 var cacheFetchedAt = 0;        // performance.now() of last fetch
 var openTicketNo = null;       // number of ticket open in overlay
+var viewTickets = [];          // последний показанный список (для оптимистичной перерисовки)
+var viewContainerId = '';      // контейнер текущего списка
 
 // ============================ API ============================
 function api(action, payload) {
@@ -353,14 +355,15 @@ function buildUI() {
     addTab('new', 'Создать');
     switchView('admin');
   } else {
-    var dbg = '';
     if (!TG_ID) {
-      var raw = tg ? (tg.initData || '') : '';
-      dbg = '<br><span style="font-size:10px;opacity:.7">tg:' + (tg ? 'y' : 'n') +
-            ' · ' + (tg ? tg.platform : '?') + ' · v' + (tg ? tg.version : '?') +
-            ' · initData:' + raw.length + '</span>';
+      roleChip.innerHTML = '<span style="color:var(--amber)">⚠ Не удалось определить профиль. ' +
+        'Откройте бота в <b>официальном приложении Telegram</b> — ваш клиент не поддерживает Mini Apps.</span>' +
+        '<br><span style="font-size:10px;opacity:.55">tg:' + (tg ? 'y' : 'n') +
+        ' · ' + (tg ? tg.platform : '?') + ' · v' + (tg ? tg.version : '?') +
+        ' · initData:' + (tg ? (tg.initData || '').length : 0) + '</span>';
+    } else {
+      roleChip.innerHTML = 'Сотрудник' + (USER_NAME ? ': <b>' + esc(USER_NAME) + '</b>' : '') + ' · id ' + TG_ID;
     }
-    roleChip.innerHTML = 'Сотрудник' + (USER_NAME ? ': <b>' + esc(USER_NAME) + '</b>' : '') + ' · id ' + (TG_ID || '—') + dbg;
     tabsEl.innerHTML = '';
     addTab('new', 'Новая заявка');
     addTab('mine', 'Мои заявки');
@@ -467,8 +470,17 @@ function listError(id, e) {
 function renderList(containerId, tickets, isAdmin) {
   cacheFetchedAt = performance.now();
   tickets.forEach(function (t) { ticketCache[t.number] = t; });
+  viewTickets = tickets;
+  viewContainerId = containerId;
+  paintList(containerId, tickets);
+  // если открыта карточка из этого списка — обновим её
+  if (openTicketNo && ticketCache[openTicketNo]) renderDetail(ticketCache[openTicketNo]);
+}
 
+// Чистая отрисовка списка из массива (без сети) — для оптимистичных обновлений.
+function paintList(containerId, tickets) {
   var c = document.getElementById(containerId);
+  if (!c) return;
   if (!tickets.length) {
     var msg = containerId === 'historyList' ? 'Пока нет решённых заявок'
             : containerId === 'adminList'  ? 'Активных заявок нет'
@@ -481,8 +493,6 @@ function renderList(containerId, tickets, isAdmin) {
   for (var i = 0; i < cards.length; i++) {
     (function (card) { card.onclick = function () { openDetail(card.dataset.no); }; })(cards[i]);
   }
-  // если открыта карточка из этого списка — обновим её
-  if (openTicketNo && ticketCache[openTicketNo]) renderDetail(ticketCache[openTicketNo]);
 }
 
 function cardHTML(t) {
@@ -570,14 +580,67 @@ function renderDetail(t) {
 function row(k, v) { return '<div class="detail-row"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'; }
 
 function act(action, number) {
+  var prev = ticketCache[number];
+  if (!prev) return;
+  var snapshot = JSON.parse(JSON.stringify(prev));
+
+  // 1) Оптимистичное обновление — мгновенно меняем состояние локально.
+  var t = optimistic(prev, action);
+  ticketCache[number] = t;
+  cacheFetchedAt = performance.now();
+  patchViewList(number, t, action);
+  if (openTicketNo === number) renderDetail(t);
+
+  // 2) Запрос на сервер; ответ — источник истины.
   api(action, { number: number, name: USER_NAME }).then(function (d) {
     ticketCache[d.ticket.number] = d.ticket;
     cacheFetchedAt = performance.now();
-    renderDetail(d.ticket);
-    if (currentView === 'admin') refreshAdmin();
-    if (currentView === 'history') refreshHistory();
-    if (action === 'finishTicket') { toast('Заявка ' + number + ' решена'); setTimeout(closeDetail, 700); }
-  }).catch(function (e) { toast(e.message, true); });
+    if (openTicketNo === number) renderDetail(d.ticket);
+    if (action === 'finishTicket') { toast('Заявка ' + number + ' решена'); setTimeout(closeDetail, 500); }
+    refreshCurrent();
+  }).catch(function (e) {
+    // 3) Откат: возвращаем прежнее состояние.
+    ticketCache[number] = snapshot;
+    cacheFetchedAt = performance.now();
+    if (openTicketNo === number) renderDetail(snapshot);
+    toast('Не удалось: ' + e.message, true);
+    refreshCurrent();
+  });
+}
+
+function optimistic(prev, action) {
+  var t = JSON.parse(JSON.stringify(prev));
+  if (action === 'takeTicket') {
+    t.status = 'в работе'; t.isRunning = true;
+    t.adminName = USER_NAME || t.adminName; t.adminId = TG_ID;
+  } else if (action === 'pauseTicket') {
+    t.elapsedSeconds = liveElapsed(prev); t.status = 'на паузе'; t.isRunning = false;
+  } else if (action === 'resumeTicket') {
+    t.status = 'в работе'; t.isRunning = true;
+  } else if (action === 'finishTicket') {
+    t.elapsedSeconds = liveElapsed(prev); t.status = 'решена'; t.isRunning = false;
+    t.resolvedAt = new Date().toISOString();
+  }
+  return t;
+}
+
+// Мгновенно отражаем изменение в текущем списке.
+function patchViewList(number, t, action) {
+  var idx = -1;
+  for (var i = 0; i < viewTickets.length; i++) { if (viewTickets[i].number === number) { idx = i; break; } }
+  if (idx < 0) return;
+  if (action === 'finishTicket' && viewContainerId === 'adminList') {
+    viewTickets.splice(idx, 1);   // решённая уходит из активных
+  } else {
+    viewTickets[idx] = t;
+  }
+  paintList(viewContainerId, viewTickets);
+}
+
+function refreshCurrent() {
+  if (currentView === 'admin') refreshAdmin();
+  else if (currentView === 'history') refreshHistory();
+  else if (currentView === 'mine') refreshMine();
 }
 
 // ============================ LIVE TIMER ============================
