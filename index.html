@@ -20,6 +20,9 @@
     --red: #ef5350;
     --amber: #f2b01e;
     --green: #2ecc71;
+    --violet: #8b7cff;  /* на доработке */
+    --cyan: #2bb8d6;    /* исправлена */
+    --grayd: #7a8290;   /* отклонена */
 
     --radius: 16px;
     --radius-sm: 10px;
@@ -121,6 +124,9 @@
   .card.s-work  { border-left-color: var(--amber); background: linear-gradient(90deg, color-mix(in srgb, var(--amber) 9%, var(--surface)), var(--surface) 55%); }
   .card.s-pause { border-left-color: var(--amber); }
   .card.s-done  { border-left-color: var(--green); background: linear-gradient(90deg, color-mix(in srgb, var(--green) 8%, var(--surface)), var(--surface) 55%); }
+  .card.s-revision { border-left-color: var(--violet); background: linear-gradient(90deg, color-mix(in srgb, var(--violet) 11%, var(--surface)), var(--surface) 55%); }
+  .card.s-fixed    { border-left-color: var(--cyan);   background: linear-gradient(90deg, color-mix(in srgb, var(--cyan) 10%, var(--surface)), var(--surface) 55%); }
+  .card.s-rejected { border-left-color: var(--grayd); opacity: .82; }
 
   .card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
   .ticket-no { font-weight: 700; font-size: 15px; letter-spacing: .5px; font-variant-numeric: tabular-nums; }
@@ -133,6 +139,9 @@
   .badge.s-work  { color: var(--amber); background: color-mix(in srgb, var(--amber) 16%, transparent); }
   .badge.s-pause { color: var(--amber); background: color-mix(in srgb, var(--amber) 16%, transparent); }
   .badge.s-done  { color: var(--green); background: color-mix(in srgb, var(--green) 16%, transparent); }
+  .badge.s-revision { color: var(--violet); background: color-mix(in srgb, var(--violet) 16%, transparent); }
+  .badge.s-fixed    { color: var(--cyan);   background: color-mix(in srgb, var(--cyan) 16%, transparent); }
+  .badge.s-rejected { color: var(--grayd);  background: color-mix(in srgb, var(--grayd) 18%, transparent); }
 
   .card-meta { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 10px; }
   .card-desc { margin-top: 8px; font-size: 14px; color: var(--text);
@@ -194,7 +203,27 @@
     cursor: pointer; font-size: 13px; font-family: inherit; }
   .shot-wrap { margin: 12px 0; }
   .shot-wrap a { display: inline-block; margin-top: 6px; font-size: 13px; color: var(--accent); text-decoration: none; }
-  .actions.secondary { margin-top: 10px; }
+  .actions.secondary { margin-top: 10px; flex-wrap: wrap; }
+  .btn-revision { background: var(--violet); color: #1a1330; }
+  .btn-reject   { background: color-mix(in srgb, var(--red) 22%, var(--surface)); color: var(--red); border: 1px solid color-mix(in srgb, var(--red) 40%, transparent); }
+
+  /* Файл-вложение (не изображение) */
+  .file-chip { display: flex; align-items: center; gap: 10px; margin: 12px 0; padding: 12px 14px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm);
+    text-decoration: none; color: var(--text); }
+  .file-chip .ico { font-size: 22px; flex: 0 0 auto; }
+  .file-chip .nm { font-size: 13px; color: var(--accent); word-break: break-all; }
+
+  /* Блок основания доработки/отклонения */
+  .reason-box { margin: 12px 0; padding: 12px 14px; border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--violet) 10%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--violet) 32%, transparent); }
+  .reason-box .l { font-size: 11px; font-weight: 700; color: var(--violet);
+    text-transform: uppercase; letter-spacing: .06em; margin-bottom: 5px; }
+  .reason-box .v { white-space: pre-wrap; font-size: 14px; line-height: 1.45; }
+  .reason-box.reject { background: color-mix(in srgb, var(--red) 9%, var(--surface));
+    border-color: color-mix(in srgb, var(--red) 32%, transparent); }
+  .reason-box.reject .l { color: var(--red); }
 
   /* ---------- States ---------- */
   .empty { text-align: center; color: var(--muted); padding: 48px 20px; font-size: 14px; }
@@ -251,9 +280,9 @@
       <textarea class="control" id="f-desc" placeholder="Введите описание проблемы" required></textarea>
     </div>
     <div class="field">
-      <label>Скриншот (необязательно)</label>
-      <label class="filebtn" id="fileLabel" for="f-image">📎 Прикрепить изображение</label>
-      <input type="file" id="f-image" accept="image/*" hidden />
+      <label>Файл (необязательно)</label>
+      <label class="filebtn" id="fileLabel" for="f-image">📎 Прикрепить файл</label>
+      <input type="file" id="f-image" hidden />
       <div id="imgPreview"></div>
     </div>
     <button class="submit" id="submitBtn" type="submit" disabled>Отправить заявку</button>
@@ -313,8 +342,16 @@ var OFFICES = {
   'Кемерово':      ['КМР1']
 };
 
-var STATUS_CLASS = { 'создана': 's-new', 'в работе': 's-work', 'на паузе': 's-pause', 'решена': 's-done' };
-var STATUS_LABEL = { 'создана': 'Создана', 'в работе': 'В работе', 'на паузе': 'На паузе', 'решена': 'Решена' };
+var STATUS_CLASS = {
+  'создана': 's-new', 'в работе': 's-work', 'на паузе': 's-pause', 'решена': 's-done',
+  'на доработке': 's-revision', 'исправлена': 's-fixed', 'отклонена': 's-rejected'
+};
+var STATUS_LABEL = {
+  'создана': 'Создана', 'в работе': 'В работе', 'на паузе': 'На паузе', 'решена': 'Решена',
+  'на доработке': 'Отправлен на доработку', 'исправлена': 'Исправлена', 'отклонена': 'Заявка отклонена'
+};
+// статусы с накопленным временем (показываем таймер; «в работе» — живой, остальные — застывший)
+var STATUS_HAS_TIME = { 'в работе': 1, 'на паузе': 1, 'решена': 1, 'на доработке': 1, 'исправлена': 1, 'отклонена': 1 };
 
 // ============================ STATE ============================
 var tg = null;
@@ -339,10 +376,16 @@ var cacheFetchedAt = 0;        // performance.now() of last fetch
 var openTicketNo = null;       // number of ticket open in overlay
 var viewTickets = [];          // последний показанный список (для оптимистичной перерисовки)
 var viewContainerId = '';      // контейнер текущего списка
-var pendingImage = '';         // dataURL прикреплённого к новой заявке скриншота
+var pendingImage = '';         // dataURL прикреплённого к новой заявке файла
+var pendingFileName = '';      // исходное имя прикреплённого файла (новая заявка)
+var revFile = '';              // dataURL файла при доработке заявки сотрудником
+var revFileName = '';          // исходное имя файла при доработке
 var lastDetailNo = null;       // для какой заявки последний раз рисовали детали
 var lastDetailSig = '';        // сигнатура состояния заявки (чтобы не перерисовывать зря)
 var GUEST_PENDING = false;     // гость уже отправил запрос на доступ
+
+var TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Перемещение'];
+var MAX_FILE_BYTES = 20 * 1024 * 1024; // потолок размера вложения (20 МБ)
 
 // ============================ API ============================
 function api(action, payload) {
@@ -518,10 +561,11 @@ function initForm() {
     imgInput._wired = true;
     imgInput.addEventListener('change', function () {
       var f = imgInput.files && imgInput.files[0];
-      if (!f) { pendingImage = ''; renderImgPreview(); return; }
-      loadImageScaled(f, 1280, 0.8)
-        .then(function (dataUrl) { pendingImage = dataUrl; renderImgPreview(); })
-        .catch(function () { toast('Не удалось обработать изображение', true); });
+      if (!f) { pendingImage = ''; pendingFileName = ''; renderImgPreview(); return; }
+      if (f.size > MAX_FILE_BYTES) { toast('Файл больше 20 МБ', true); imgInput.value = ''; return; }
+      readAttachment(f)
+        .then(function (res) { pendingImage = res.dataUrl; pendingFileName = res.name; renderImgPreview(f.type); })
+        .catch(function () { toast('Не удалось обработать файл', true); });
     });
   }
 
@@ -550,22 +594,54 @@ function loadImageScaled(file, maxDim, quality) {
   });
 }
 
-function renderImgPreview() {
+// Готовит вложение к отправке: изображения сжимаем через canvas в JPEG,
+// остальные файлы читаем как есть (dataURL). Возвращает { dataUrl, name }.
+function readAttachment(file) {
+  if (file.type && file.type.indexOf('image/') === 0) {
+    return loadImageScaled(file, 1280, 0.8).then(function (dataUrl) {
+      var base = (file.name || 'image').replace(/\.[^.]+$/, '');
+      return { dataUrl: dataUrl, name: base + '.jpg' };
+    });
+  }
+  return readFileDataUrl(file).then(function (dataUrl) {
+    return { dataUrl: dataUrl, name: file.name || 'file' };
+  });
+}
+
+function readFileDataUrl(file) {
+  return new Promise(function (resolve, reject) {
+    var r = new FileReader();
+    r.onload = function () { resolve(r.result); };
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+// Превью выбранного вложения: картинка — миниатюрой, иначе — имя файла.
+function attachPreviewHTML(res, mimeType) {
+  if (mimeType && mimeType.indexOf('image/') === 0) {
+    return '<img src="' + res.dataUrl + '" alt="превью" />';
+  }
+  return '<div class="file-chip"><span class="ico">📄</span><span class="nm">' + esc(res.name) + '</span></div>';
+}
+
+function renderImgPreview(mimeType) {
   var el = document.getElementById('imgPreview');
   var label = document.getElementById('fileLabel');
   if (!el) return;
   if (!pendingImage) {
     el.innerHTML = '';
-    if (label) label.textContent = '📎 Прикрепить изображение';
+    if (label) label.textContent = '📎 Прикрепить файл';
     return;
   }
-  el.innerHTML = '<img src="' + pendingImage + '" alt="превью" />' +
-    '<button type="button" class="img-clear" onclick="clearImage()">Удалить изображение</button>';
-  if (label) label.textContent = '📎 Изображение прикреплено';
+  el.innerHTML = attachPreviewHTML({ dataUrl: pendingImage, name: pendingFileName }, mimeType) +
+    '<button type="button" class="img-clear" onclick="clearImage()">Удалить файл</button>';
+  if (label) label.textContent = '📎 Файл прикреплён';
 }
 
 function clearImage() {
   pendingImage = '';
+  pendingFileName = '';
   var i = document.getElementById('f-image'); if (i) i.value = '';
   renderImgPreview();
 }
@@ -583,7 +659,7 @@ function submitTicket(e) {
   api('createTicket', {
     type: val('f-type'), city: val('f-city'), office: val('f-office'),
     name: val('f-name'), description: val('f-desc'),
-    image: pendingImage || undefined
+    image: pendingImage || undefined, filename: pendingFileName || undefined
   }).then(function (data) {
     toast('Заявка ' + data.ticket.number + ' создана');
     document.getElementById('ticketForm').reset();
@@ -681,7 +757,7 @@ function renderList(containerId, tickets, isAdmin) {
 
 // Сигнатура значимого состояния заявки (без elapsedSeconds — таймер тикает отдельно).
 function detailSig(t) {
-  return [t.status, t.adminId, t.adminName, t.screenshotUrl, t.idleSeconds, t.resolvedAt].join('|');
+  return [t.status, t.adminId, t.adminName, t.fileUrl, t.reason, t.idleSeconds, t.resolvedAt].join('|');
 }
 
 // Чистая отрисовка списка из массива (без сети) — для оптимистичных обновлений.
@@ -707,7 +783,7 @@ function cardHTML(t) {
   var timer = '';
   if (t.status === 'в работе' || t.status === 'на паузе') {
     timer = '<div class="card-timer" data-timer="' + t.number + '">' + fmt(liveElapsed(t)) + '</div>';
-  } else if (t.status === 'решена') {
+  } else if (STATUS_HAS_TIME[t.status] && t.elapsedSeconds) {
     timer = '<div class="card-timer">⏱ ' + fmt(t.elapsedSeconds) + '</div>';
   }
   return '' +
@@ -720,7 +796,7 @@ function cardHTML(t) {
         '<span>' + esc(t.type) + '</span>' +
         '<span>' + esc(t.city) + ' · ' + esc(t.office) + '</span>' +
         '<span>' + dateShort(t.createdAt) + '</span>' +
-        (t.screenshotUrl ? '<span>📎</span>' : '') +
+        (t.fileUrl ? '<span>📎</span>' : '') +
       '</div>' +
       '<div class="card-desc">' + esc(t.description) + '</div>' +
       timer +
@@ -743,36 +819,42 @@ function closeDetail() {
 
 function renderDetail(t) {
   var isAdmin = ROLE === 'админ';
+  var isCreator = String(t.creatorId) === TG_ID;
   var cls = STATUS_CLASS[t.status] || '';
+
+  // Сотрудник дорабатывает возвращённую заявку — особый режим с формой правки.
+  if (!isAdmin && isCreator && t.status === 'на доработке') {
+    renderRevisionView(t, cls);
+    return;
+  }
+
   var running = t.status === 'в работе';
-  var timerCls = running ? 'running' : (t.status === 'решена' ? 'done' : '');
+  var terminal = t.status === 'решена' || t.status === 'отклонена';
+  var timerCls = running ? 'running' : (terminal ? 'done' : '');
 
   var actions = '';
   var secondary = '';
   if (isAdmin) {
-    if (t.status === 'создана') {
+    if (t.status === 'создана' || t.status === 'исправлена') {
       actions = '<button class="btn btn-take" onclick="act(\'takeTicket\',\'' + t.number + '\')">Взять в работу</button>';
-    } else if (t.status === 'в работе') {
-      actions =
-        '<button class="btn btn-pause" onclick="act(\'pauseTicket\',\'' + t.number + '\')">Пауза</button>' +
+      secondary = '<button class="btn btn-reject" onclick="openReason(\'' + t.number + '\',\'reject\')">Отклонить</button>';
+    } else if (t.status === 'в работе' || t.status === 'на паузе') {
+      actions = (t.status === 'в работе'
+          ? '<button class="btn btn-pause" onclick="act(\'pauseTicket\',\'' + t.number + '\')">Пауза</button>'
+          : '<button class="btn btn-resume" onclick="act(\'resumeTicket\',\'' + t.number + '\')">Продолжить</button>') +
         '<button class="btn btn-finish" onclick="act(\'finishTicket\',\'' + t.number + '\')">Завершить</button>';
-    } else if (t.status === 'на паузе') {
-      actions =
-        '<button class="btn btn-resume" onclick="act(\'resumeTicket\',\'' + t.number + '\')">Продолжить</button>' +
-        '<button class="btn btn-finish" onclick="act(\'finishTicket\',\'' + t.number + '\')">Завершить</button>';
-    }
-    // Вторичные действия: передача (когда взята) и прикрепление скрина (пока не решена).
-    var canTransfer = t.status === 'в работе' || t.status === 'на паузе';
-    if (t.status !== 'решена') {
       secondary =
-        (canTransfer ? '<button class="btn btn-pause" onclick="openTransfer(\'' + t.number + '\')">Передать</button>' : '') +
+        '<button class="btn btn-pause" onclick="openTransfer(\'' + t.number + '\')">Передать</button>' +
+        '<button class="btn btn-revision" onclick="openReason(\'' + t.number + '\',\'revision\')">На доработку</button>' +
         '<button class="btn btn-pause" onclick="document.getElementById(\'detail-image\').click()">' +
-          (t.screenshotUrl ? 'Заменить скрин' : 'Прикрепить скрин') + '</button>';
+          (t.fileUrl ? 'Заменить файл' : 'Прикрепить файл') + '</button>' +
+        '<button class="btn btn-reject" onclick="openReason(\'' + t.number + '\',\'reject\')">Отклонить</button>';
     }
+    // На доработке (ждёт сотрудника) и терминальные — действий у админа нет.
   }
 
-  var showTimer = t.status !== 'создана';
-  var timerLabel = t.status === 'решена' ? 'Затраченное время' : 'Время в работе';
+  var showTimer = !!STATUS_HAS_TIME[t.status];
+  var timerLabel = terminal ? 'Затраченное время' : 'Время в работе';
 
   document.getElementById('detailBody').innerHTML = '' +
     '<div class="detail-head">' +
@@ -785,9 +867,10 @@ function renderDetail(t) {
     row('Отправитель', esc(t.senderName)) +
     (t.adminName ? row('Исполнитель', esc(t.adminName)) : '') +
     (t.idleSeconds ? row('Не в работе', fmtMin(t.idleSeconds)) : '') +
-    (t.status === 'решена' && t.resolvedAt ? row('Решена', dateFull(t.resolvedAt)) : '') +
+    (terminal && t.resolvedAt ? row(t.status === 'отклонена' ? 'Отклонена' : 'Решена', dateFull(t.resolvedAt)) : '') +
+    reasonHTML(t) +
     '<div class="detail-desc">' + esc(t.description) + '</div>' +
-    shotHTML(t) +
+    fileHTML(t) +
     (showTimer ?
       '<div class="timer-box ' + timerCls + '">' +
         '<div class="t" data-detail-timer="' + t.number + '">' + fmt(liveElapsed(t)) + '</div>' +
@@ -795,20 +878,34 @@ function renderDetail(t) {
       '</div>' : '') +
     (actions ? '<div class="actions">' + actions + '</div>' : '') +
     (secondary ? '<div class="actions secondary">' + secondary + '</div>' : '') +
-    '<input type="file" id="detail-image" accept="image/*" style="display:none" onchange="onDetailImage(\'' + t.number + '\')" />' +
-    '<div id="transferPanel"></div>';
+    '<input type="file" id="detail-image" style="display:none" onchange="onDetailImage(\'' + t.number + '\')" />' +
+    '<div id="actionPanel"></div>';
 
   lastDetailNo = t.number;
   lastDetailSig = detailSig(t);
 }
 
-function shotHTML(t) {
-  if (!t.screenshotUrl) return '';
-  var id = driveId(t.screenshotUrl);
-  var thumb = id ? 'https://drive.google.com/thumbnail?id=' + id + '&sz=w1000' : t.screenshotUrl;
+// Блок основания доработки/отклонения (если есть).
+function reasonHTML(t) {
+  if (!t.reason) return '';
+  if (t.status === 'отклонена') {
+    return '<div class="reason-box reject"><div class="l">Причина отклонения</div><div class="v">' + esc(t.reason) + '</div></div>';
+  }
+  if (t.status === 'на доработке' || t.status === 'исправлена') {
+    return '<div class="reason-box"><div class="l">Причина доработки</div><div class="v">' + esc(t.reason) + '</div></div>';
+  }
+  return '';
+}
+
+// Вложение: миниатюра (для изображений/PDF) + ссылка на открытие файла.
+function fileHTML(t) {
+  if (!t.fileUrl) return '';
+  var id = driveId(t.fileUrl);
+  var thumb = id ? 'https://drive.google.com/thumbnail?id=' + id + '&sz=w1000' : t.fileUrl;
   return '<div class="shot-wrap">' +
-    '<img class="shot" src="' + esc(thumb) + '" alt="скриншот" onerror="this.remove()" />' +
-    '<a href="' + esc(t.screenshotUrl) + '" target="_blank" rel="noopener">📎 Открыть скриншот</a>' +
+    '<img class="shot" src="' + esc(thumb) + '" alt="вложение" onerror="this.style.display=\'none\'" />' +
+    '<a class="file-chip" href="' + esc(t.fileUrl) + '" target="_blank" rel="noopener">' +
+      '<span class="ico">📎</span><span class="nm">Открыть файл</span></a>' +
     '</div>';
 }
 
@@ -880,7 +977,7 @@ function refreshCurrent() {
 
 // ============================ TRANSFER ============================
 function openTransfer(number) {
-  var panel = document.getElementById('transferPanel');
+  var panel = document.getElementById('actionPanel');
   if (!panel) return;
   panel.innerHTML = '<div class="loader">Загрузка списка…</div>';
   api('getAdmins', {}).then(function (d) {
@@ -893,19 +990,55 @@ function openTransfer(number) {
       '<div class="field" style="margin-top:14px"><label>Передать администратору</label>' +
         '<select class="control" id="transferTo">' + opts + '</select></div>' +
       '<div class="actions">' +
-        '<button class="btn btn-pause" onclick="closeTransfer()">Отмена</button>' +
+        '<button class="btn btn-pause" onclick="closeActionPanel()">Отмена</button>' +
         '<button class="btn btn-take" onclick="doTransfer(\'' + number + '\')">Передать</button>' +
       '</div>';
   }).catch(function (e) { panel.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; });
 }
 
-function closeTransfer() { var p = document.getElementById('transferPanel'); if (p) p.innerHTML = ''; }
+function closeActionPanel() { var p = document.getElementById('actionPanel'); if (p) p.innerHTML = ''; }
+
+// ============================ ОСНОВАНИЕ (доработка / отклонение) ============================
+// mode: 'revision' — отправить на доработку, 'reject' — отклонить заявку.
+function openReason(number, mode) {
+  var panel = document.getElementById('actionPanel');
+  if (!panel) return;
+  var isReject = mode === 'reject';
+  var title = isReject ? 'Основание отклонения' : 'Основание доработки';
+  var confirmLabel = isReject ? 'Отклонить заявку' : 'Отправить на доработку';
+  var confirmCls = isReject ? 'btn-reject' : 'btn-revision';
+  panel.innerHTML =
+    '<div class="field" style="margin-top:14px"><label>' + title + '</label>' +
+      '<textarea class="control" id="reasonText" placeholder="Опишите, что не так с заявкой"></textarea></div>' +
+    '<div class="actions">' +
+      '<button class="btn btn-pause" onclick="closeActionPanel()">Отмена</button>' +
+      '<button class="btn ' + confirmCls + '" onclick="confirmReason(\'' + number + '\',\'' + mode + '\')">' + confirmLabel + '</button>' +
+    '</div>';
+  var ta = document.getElementById('reasonText');
+  if (ta) ta.focus();
+}
+
+function confirmReason(number, mode) {
+  var ta = document.getElementById('reasonText');
+  var reason = ta ? ta.value.trim() : '';
+  if (!reason) { toast('Укажите основание', true); if (ta) ta.focus(); return; }
+  var action = mode === 'reject' ? 'rejectTicket' : 'returnTicket';
+  closeActionPanel();
+  api(action, { number: number, reason: reason, name: USER_NAME }).then(function (d) {
+    ticketCache[d.ticket.number] = d.ticket;
+    cacheFetchedAt = performance.now();
+    if (openTicketNo === number) renderDetail(d.ticket);
+    toast(mode === 'reject' ? 'Заявка ' + number + ' отклонена' : 'Заявка ' + number + ' отправлена на доработку');
+    if (mode === 'reject') setTimeout(closeDetail, 500);
+    refreshCurrent();
+  }).catch(function (e) { toast(e.message, true); });
+}
 
 function doTransfer(number) {
   var sel = document.getElementById('transferTo');
   if (!sel) return;
   var toId = sel.value;
-  closeTransfer();
+  closeActionPanel();
   api('transferTicket', { number: number, to_tg_id: toId, name: USER_NAME }).then(function (d) {
     ticketCache[d.ticket.number] = d.ticket;
     cacheFetchedAt = performance.now();
@@ -915,19 +1048,112 @@ function doTransfer(number) {
   }).catch(function (e) { toast(e.message, true); });
 }
 
-// Прикрепление скриншота админом в открытой заявке.
+// ============================ ДОРАБОТКА (сотрудник) ============================
+function renderRevisionView(t, cls) {
+  document.getElementById('detailBody').innerHTML = '' +
+    '<div class="detail-head">' +
+      '<span class="ticket-no">' + esc(t.number) + '</span>' +
+      '<span class="badge ' + cls + '">' + (STATUS_LABEL[t.status] || t.status) + '</span>' +
+    '</div>' +
+    reasonHTML(t) +
+    '<div class="section-title" style="margin:8px 2px 12px">Исправьте данные и отправьте снова</div>' +
+    '<div class="field"><label>Тип заявки</label>' +
+      '<select class="control" id="rev-type">' + typeOptionsHTML(t.type) + '</select></div>' +
+    '<div class="field"><label>Город</label>' +
+      '<select class="control" id="rev-city" onchange="onRevisionCity()">' + cityOptionsHTML(t.city) + '</select></div>' +
+    '<div class="field"><label>Офис</label>' +
+      '<select class="control" id="rev-office">' + officeOptionsHTML(t.city, t.office) + '</select></div>' +
+    '<div class="field"><label>Имя отправителя</label>' +
+      '<input class="control" id="rev-name" type="text" value="' + esc(t.senderName) + '" /></div>' +
+    '<div class="field"><label>Описание проблемы</label>' +
+      '<textarea class="control" id="rev-desc">' + esc(t.description) + '</textarea></div>' +
+    '<div class="field"><label>Файл (необязательно)</label>' +
+      '<label class="filebtn" id="revFileLabel" for="rev-image">📎 ' + (t.fileUrl ? 'Заменить файл' : 'Прикрепить файл') + '</label>' +
+      '<input type="file" id="rev-image" hidden onchange="onRevisionFile()" />' +
+      '<div id="revImgPreview"></div></div>' +
+    (t.fileUrl ? '<div style="margin:-6px 2px 12px;font-size:12px;color:var(--muted)">Уже прикреплён файл — ' +
+        '<a href="' + esc(t.fileUrl) + '" target="_blank" rel="noopener" style="color:var(--accent)">открыть</a>. Новый заменит его.</div>' : '') +
+    '<div class="actions">' +
+      '<button class="btn btn-take" id="resubmitBtn" onclick="doResubmit(\'' + t.number + '\')">Отправить снова</button>' +
+    '</div>';
+  revFile = ''; revFileName = '';
+  lastDetailNo = t.number;
+  lastDetailSig = detailSig(t);
+}
+
+function typeOptionsHTML(selected) {
+  return TYPES.map(function (tp) {
+    return '<option' + (tp === selected ? ' selected' : '') + '>' + esc(tp) + '</option>';
+  }).join('');
+}
+function cityOptionsHTML(selected) {
+  return Object.keys(OFFICES).map(function (c) {
+    return '<option' + (c === selected ? ' selected' : '') + '>' + esc(c) + '</option>';
+  }).join('');
+}
+function officeOptionsHTML(city, selected) {
+  var list = OFFICES[city] || [];
+  return list.map(function (of) {
+    return '<option' + (of === selected ? ' selected' : '') + '>' + esc(of) + '</option>';
+  }).join('');
+}
+
+function onRevisionCity() {
+  var c = document.getElementById('rev-city');
+  var o = document.getElementById('rev-office');
+  if (c && o) o.innerHTML = officeOptionsHTML(c.value, '');
+}
+
+function onRevisionFile() {
+  var inp = document.getElementById('rev-image');
+  var f = inp && inp.files && inp.files[0];
+  var label = document.getElementById('revFileLabel');
+  var prev = document.getElementById('revImgPreview');
+  if (!f) { revFile = ''; revFileName = ''; if (prev) prev.innerHTML = ''; return; }
+  if (f.size > MAX_FILE_BYTES) { toast('Файл больше 20 МБ', true); inp.value = ''; return; }
+  readAttachment(f).then(function (res) {
+    revFile = res.dataUrl; revFileName = res.name;
+    if (label) label.textContent = '📎 Файл выбран';
+    if (prev) prev.innerHTML = attachPreviewHTML(res, f.type);
+  }).catch(function () { toast('Не удалось обработать файл', true); });
+}
+
+function doResubmit(number) {
+  var type = revVal('rev-type'), city = revVal('rev-city'), office = revVal('rev-office'),
+      name = revVal('rev-name'), desc = revVal('rev-desc');
+  if (!type || !city || !office || !name || !desc) { toast('Заполните все поля', true); return; }
+  var btn = document.getElementById('resubmitBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Отправка…'; }
+  api('resubmitTicket', {
+    number: number, type: type, city: city, office: office, name: name, description: desc,
+    image: revFile || undefined, filename: revFileName || undefined
+  }).then(function (d) {
+    ticketCache[d.ticket.number] = d.ticket;
+    cacheFetchedAt = performance.now();
+    toast('Заявка ' + number + ' отправлена в работу');
+    closeDetail();
+    refreshCurrent();
+  }).catch(function (e) {
+    toast(e.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = 'Отправить снова'; }
+  });
+}
+function revVal(id) { var el = document.getElementById(id); return el ? el.value.trim() : ''; }
+
+// Прикрепление файла админом в открытой заявке.
 function onDetailImage(number) {
   var inp = document.getElementById('detail-image');
   var f = inp && inp.files && inp.files[0];
   if (!f) return;
-  toast('Загрузка изображения…');
-  loadImageScaled(f, 1280, 0.8).then(function (dataUrl) {
-    return api('addScreenshot', { number: number, image: dataUrl });
+  if (f.size > MAX_FILE_BYTES) { toast('Файл больше 20 МБ', true); inp.value = ''; return; }
+  toast('Загрузка файла…');
+  readAttachment(f).then(function (res) {
+    return api('addScreenshot', { number: number, image: res.dataUrl, filename: res.name });
   }).then(function (d) {
     ticketCache[d.ticket.number] = d.ticket;
     cacheFetchedAt = performance.now();
     if (openTicketNo === number) renderDetail(d.ticket);
-    toast('Скриншот прикреплён');
+    toast('Файл прикреплён');
     refreshCurrent();
   }).catch(function (e) { toast(e.message, true); });
 }
