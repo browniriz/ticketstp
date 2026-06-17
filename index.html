@@ -307,7 +307,7 @@ var STATUS_CLASS = { 'создана': 's-new', 'в работе': 's-work', 'н
 var STATUS_LABEL = { 'создана': 'Создана', 'в работе': 'В работе', 'на паузе': 'На паузе', 'решена': 'Решена' };
 
 // ============================ STATE ============================
-var tg = window.Telegram ? window.Telegram.WebApp : null;
+var tg = null;
 var USER = null;
 var TG_ID = '';
 var ROLE = 'сотрудник';
@@ -348,9 +348,25 @@ function api(action, payload) {
 }
 
 // ============================ BOOT ============================
-function boot() {
-  if (tg) { tg.ready(); tg.expand(); }
-  readUser();
+function boot() { waitForTelegram(0); }
+
+// Ждём появления Telegram.WebApp и данных пользователя: SDK/ initData могут
+// прийти с задержкой (медленная сеть, особенности клиента). До ~3 секунд.
+function waitForTelegram(attempt) {
+  if (window.Telegram && window.Telegram.WebApp) {
+    tg = window.Telegram.WebApp;
+    try { tg.ready(); } catch (e) {}
+    try { tg.expand(); } catch (e) {}
+    readUser();
+  }
+  if (!TG_ID && attempt < 15) {
+    setTimeout(function () { waitForTelegram(attempt + 1); }, 200);
+    return;
+  }
+  loadRole();
+}
+
+function loadRole() {
   api('getRole', {})
     .then(function (data) {
       ROLE = data.role || 'сотрудник';
