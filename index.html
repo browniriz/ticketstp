@@ -278,6 +278,16 @@
   <div class="cards" id="historyList"><div class="loader">Загрузка…</div></div>
 </section>
 
+<!-- ===== Admin: access management ===== -->
+<section class="screen" id="screen-access">
+  <div id="accessBody"><div class="loader">Загрузка…</div></div>
+</section>
+
+<!-- ===== Guest: no access yet ===== -->
+<section class="screen" id="screen-guest">
+  <div id="guestBody"></div>
+</section>
+
 <!-- ===== Detail overlay ===== -->
 <div class="overlay" id="overlay">
   <div class="sheet" id="sheet"><div class="grabber"></div><div id="detailBody"></div></div>
@@ -332,6 +342,7 @@ var viewContainerId = '';      // контейнер текущего списк
 var pendingImage = '';         // dataURL прикреплённого к новой заявке скриншота
 var lastDetailNo = null;       // для какой заявки последний раз рисовали детали
 var lastDetailSig = '';        // сигнатура состояния заявки (чтобы не перерисовывать зря)
+var GUEST_PENDING = false;     // гость уже отправил запрос на доступ
 
 // ============================ API ============================
 function api(action, payload) {
@@ -369,12 +380,13 @@ function waitForTelegram(attempt) {
 function loadRole() {
   api('getRole', {})
     .then(function (data) {
-      ROLE = data.role || 'сотрудник';
+      ROLE = data.role || 'гость';
+      GUEST_PENDING = !!data.pending;
       if (data.name) USER_NAME = data.name;
       buildUI();
     })
     .catch(function (e) {
-      // не блокируем — работаем как сотрудник
+      ROLE = 'гость';   // при ошибке доступ не выдаём
       buildUI();
       if (API_URL) toast(e.message, true);
     });
@@ -382,34 +394,74 @@ function loadRole() {
 
 function buildUI() {
   var roleChip = document.getElementById('roleChip');
-  var prefill = document.getElementById('f-name');
-  if (USER_NAME && prefill && !prefill.value) prefill.value = USER_NAME;
-
   var tabsEl = document.getElementById('tabs');
+  tabsEl.innerHTML = '';
+
   if (ROLE === 'админ') {
     document.getElementById('appTitle').textContent = 'Панель заявок';
     roleChip.innerHTML = 'Режим: <b>Администратор</b> · id ' + (TG_ID || '—');
-    tabsEl.innerHTML = '';
     addTab('admin', 'Заявки');
     addTab('history', 'История');
+    addTab('access', 'Доступы');
     addTab('new', 'Создать');
+    initForm();
     switchView('admin');
-  } else {
-    if (!TG_ID) {
-      roleChip.innerHTML = '<span style="color:var(--amber)">⚠ Не удалось определить профиль. ' +
-        'Откройте бота в <b>официальном приложении Telegram</b> — ваш клиент не поддерживает Mini Apps.</span>' +
-        '<br><span style="font-size:10px;opacity:.55">tg:' + (tg ? 'y' : 'n') +
-        ' · ' + (tg ? tg.platform : '?') + ' · v' + (tg ? tg.version : '?') +
-        ' · initData:' + (tg ? (tg.initData || '').length : 0) + '</span>';
-    } else {
-      roleChip.innerHTML = 'Сотрудник' + (USER_NAME ? ': <b>' + esc(USER_NAME) + '</b>' : '') + ' · id ' + TG_ID;
-    }
-    tabsEl.innerHTML = '';
+  } else if (ROLE === 'сотрудник') {
+    document.getElementById('appTitle').textContent = 'Заявки';
+    var prefill = document.getElementById('f-name');
+    if (USER_NAME && prefill && !prefill.value) prefill.value = USER_NAME;
+    roleChip.innerHTML = 'Сотрудник' + (USER_NAME ? ': <b>' + esc(USER_NAME) + '</b>' : '') + ' · id ' + TG_ID;
     addTab('new', 'Новая заявка');
     addTab('mine', 'Мои заявки');
+    initForm();
     switchView('new');
+  } else {
+    renderGuest();
   }
-  initForm();
+}
+
+// Экран для тех, у кого ещё нет доступа.
+function renderGuest() {
+  document.getElementById('appTitle').textContent = 'Доступ к боту';
+  document.getElementById('tabs').innerHTML = '';
+  var chip = document.getElementById('roleChip');
+  var g = document.getElementById('guestBody');
+  showOnly('guest');
+
+  if (!TG_ID) {
+    chip.innerHTML = '<span style="color:var(--amber)">Профиль не определён</span>';
+    g.innerHTML = '<div class="empty"><span class="icon">⚠️</span>Не удалось определить профиль.<br>' +
+      'Откройте бота в <b>официальном приложении Telegram</b>.' +
+      '<br><span style="font-size:10px;opacity:.55">tg:' + (tg ? 'y' : 'n') +
+      ' · ' + (tg ? tg.platform : '?') + ' · initData:' + (tg ? (tg.initData || '').length : 0) + '</span></div>';
+    return;
+  }
+  chip.innerHTML = (USER_NAME ? '<b>' + esc(USER_NAME) + '</b> · ' : '') + 'id ' + TG_ID;
+  if (GUEST_PENDING) {
+    g.innerHTML = '<div class="empty"><span class="icon">⏳</span>Запрос на доступ отправлен.<br>' +
+      'Ожидайте подтверждения администратора, затем откройте приложение заново.</div>';
+  } else {
+    g.innerHTML = '<div class="empty"><span class="icon">🔒</span>Доступ к боту ещё не открыт.</div>' +
+      '<button class="submit" id="reqBtn" onclick="sendAccessRequest()">Запросить доступ</button>';
+  }
+}
+
+function sendAccessRequest() {
+  var b = document.getElementById('reqBtn');
+  if (b) { b.disabled = true; b.textContent = 'Отправка…'; }
+  api('requestAccess', { name: USER_NAME }).then(function () {
+    GUEST_PENDING = true; renderGuest(); toast('Запрос на доступ отправлен');
+  }).catch(function (e) {
+    toast(e.message, true);
+    if (b) { b.disabled = false; b.textContent = 'Запросить доступ'; }
+  });
+}
+
+function showOnly(view) {
+  var screens = document.querySelectorAll('.screen');
+  for (var i = 0; i < screens.length; i++) screens[i].classList.remove('active');
+  var el = document.getElementById('screen-' + view);
+  if (el) el.classList.add('active');
 }
 
 function addTab(view, label) {
@@ -432,6 +484,7 @@ function switchView(view) {
   if (view === 'mine')    { refreshMine(); startPolling(refreshMine); }
   if (view === 'admin')   { refreshAdmin(); startPolling(refreshAdmin); }
   if (view === 'history') { refreshHistory(); }
+  if (view === 'access')  { refreshAccess(); startPolling(refreshAccess); }
 }
 
 function startPolling(fn) { stopPolling(); pollTimer = setInterval(fn, 4000); }
@@ -557,6 +610,55 @@ function refreshAdmin() {
 function refreshHistory() {
   api('getHistory', {}).then(function (d) { renderList('historyList', d.tickets, true); })
     .catch(function (e) { listError('historyList', e); });
+}
+
+// ============================ ACCESS (админ) ============================
+function refreshAccess() {
+  api('getAccess', {}).then(function (d) {
+    renderAccess(d.requests || [], d.employees || []);
+  }).catch(function (e) {
+    document.getElementById('accessBody').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  });
+}
+
+function renderAccess(requests, employees) {
+  var html = '<div class="section-title">Запросы на доступ (' + requests.length + ')</div>';
+  if (!requests.length) {
+    html += '<div class="empty" style="padding:18px">Новых запросов нет</div>';
+  } else {
+    html += '<div class="cards">' + requests.map(function (r) {
+      return '<div class="card">' +
+        '<div class="card-top"><span class="ticket-no">' + esc(r.name || ('id ' + r.tg_id)) + '</span>' +
+        '<button class="btn btn-take" style="flex:0 0 auto;padding:8px 14px" onclick="approveAcc(\'' + esc(r.tg_id) + '\')">Одобрить</button></div>' +
+        '<div class="card-meta"><span>id ' + esc(r.tg_id) + '</span><span>' + dateShort(r.date) + '</span></div>' +
+        '</div>';
+    }).join('') + '</div>';
+  }
+  html += '<div class="section-title" style="margin-top:18px">Сотрудники с доступом (' + employees.length + ')</div>';
+  if (!employees.length) {
+    html += '<div class="empty" style="padding:18px">Пока нет сотрудников</div>';
+  } else {
+    html += '<div class="cards">' + employees.map(function (emp) {
+      return '<div class="card">' +
+        '<div class="card-top"><span class="ticket-no">' + esc(emp.name) + '</span>' +
+        '<button class="btn" style="flex:0 0 auto;padding:8px 14px;background:var(--red);color:#fff" onclick="revokeAcc(\'' + esc(emp.tg_id) + '\')">Закрыть доступ</button></div>' +
+        '<div class="card-meta"><span>id ' + esc(emp.tg_id) + '</span></div>' +
+        '</div>';
+    }).join('') + '</div>';
+  }
+  document.getElementById('accessBody').innerHTML = html;
+}
+
+function approveAcc(tgId) {
+  api('approveAccess', { target_tg_id: tgId }).then(function () {
+    toast('Доступ одобрен'); refreshAccess();
+  }).catch(function (e) { toast(e.message, true); });
+}
+
+function revokeAcc(tgId) {
+  api('revokeAccess', { target_tg_id: tgId }).then(function () {
+    toast('Доступ закрыт'); refreshAccess();
+  }).catch(function (e) { toast(e.message, true); });
 }
 
 function listError(id, e) {
