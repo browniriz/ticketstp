@@ -7,15 +7,8 @@
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root {
-    --bg: var(--tg-theme-bg-color, #0f1115);
-    --bg-soft: var(--tg-theme-secondary-bg-color, #1a1d24);
-    --surface: #20242d;
-    --surface-2: #272c37;
-    --text: var(--tg-theme-text-color, #f2f4f8);
-    --muted: var(--tg-theme-hint-color, #8b93a3);
     --accent: var(--tg-theme-button-color, #3a8dff);
     --accent-text: var(--tg-theme-button-text-color, #ffffff);
-    --line: rgba(255,255,255,0.08);
 
     --red: #ef5350;
     --amber: #f2b01e;
@@ -28,6 +21,25 @@
     --radius-sm: 10px;
     --space: 16px;
     --ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+    /* Тёмная тема (по умолчанию). Структурные цвета фиксированы по теме,
+       чтобы не было рассинхрона «белый фон + тёмные карточки». */
+    --bg: #0f1115;
+    --bg-soft: #1a1d24;
+    --surface: #20242d;
+    --surface-2: #272c37;
+    --text: #f2f4f8;
+    --muted: #8b93a3;
+    --line: rgba(255,255,255,0.08);
+  }
+  [data-theme="light"] {
+    --bg: #eceef2;
+    --bg-soft: #ffffff;
+    --surface: #ffffff;
+    --surface-2: #eef1f5;
+    --text: #11151c;
+    --muted: #5c6470;
+    --line: rgba(0,0,0,0.10);
   }
 
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -55,6 +67,16 @@
     margin-top: 4px; font-size: 12px; color: var(--muted);
   }
   .role-chip b { color: var(--text); font-weight: 600; }
+
+  .theme-toggle {
+    position: absolute; top: 12px; right: 14px;
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 1px solid var(--line); background: var(--surface);
+    color: var(--text); font-size: 15px; line-height: 1; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background .2s, transform .1s;
+  }
+  .theme-toggle:active { transform: scale(.92); }
 
   /* ---------- Tabs ---------- */
   .tabs {
@@ -240,10 +262,24 @@
 
   .loader { text-align: center; padding: 40px; color: var(--muted); }
 </style>
+<script>
+// Тему ставим как можно раньше (до отрисовки), чтобы не было вспышки чужого фона.
+(function () {
+  var t = '';
+  try { t = localStorage.getItem('ticket_theme') || ''; } catch (e) {}
+  if (!t) {
+    var tg = window.Telegram && window.Telegram.WebApp;
+    t = (tg && tg.colorScheme) ||
+        ((window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark');
+  }
+  document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+})();
+</script>
 </head>
 <body>
 
 <div class="topbar">
+  <button id="themeToggle" class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Сменить тему">🌙</button>
   <h1 id="appTitle">Заявки</h1>
   <div class="role-chip" id="roleChip"></div>
   <div class="tabs" id="tabs"></div>
@@ -402,8 +438,42 @@ function api(action, payload) {
     });
 }
 
+// ============================ THEME ============================
+var themeInited = false;
+function initTheme() {
+  if (themeInited) return;
+  themeInited = true;
+  var saved = '';
+  try { saved = localStorage.getItem('ticket_theme') || ''; } catch (e) {}
+  applyTheme(saved || (tg && tg.colorScheme) || currentTheme());
+  // Если пользователь не выбирал тему вручную — следуем за Telegram.
+  if (tg && tg.onEvent) {
+    try {
+      tg.onEvent('themeChanged', function () {
+        var manual = '';
+        try { manual = localStorage.getItem('ticket_theme') || ''; } catch (e) {}
+        if (!manual && tg.colorScheme) applyTheme(tg.colorScheme);
+      });
+    } catch (e) {}
+  }
+}
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+}
+function applyTheme(theme) {
+  theme = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', theme);
+  var b = document.getElementById('themeToggle');
+  if (b) b.textContent = theme === 'light' ? '☀️' : '🌙';
+}
+function toggleTheme() {
+  var next = currentTheme() === 'light' ? 'dark' : 'light';
+  try { localStorage.setItem('ticket_theme', next); } catch (e) {}
+  applyTheme(next);
+}
+
 // ============================ BOOT ============================
-function boot() { waitForTelegram(0); }
+function boot() { applyTheme(currentTheme()); waitForTelegram(0); }
 
 // Ждём появления Telegram.WebApp и данных пользователя: SDK/ initData могут
 // прийти с задержкой (медленная сеть, особенности клиента). До ~3 секунд.
@@ -418,6 +488,7 @@ function waitForTelegram(attempt) {
     setTimeout(function () { waitForTelegram(attempt + 1); }, 200);
     return;
   }
+  initTheme();
   loadRole();
 }
 
