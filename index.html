@@ -391,7 +391,8 @@ var MAX_FILE_BYTES = 20 * 1024 * 1024; // потолок размера влож
 function api(action, payload) {
   payload = payload || {};
   payload.action = action;
-  payload.tg_id = TG_ID;
+  payload.tg_id = TG_ID; // подсказка для UI; сервер доверяет только подписанному init_data
+  payload.init_data = (tg && tg.initData) || '';
   if (!API_URL) return Promise.reject(new Error('API_URL не задан в index.html'));
   return fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) })
     .then(function (r) { return r.json(); })
@@ -476,7 +477,7 @@ function renderGuest() {
     g.innerHTML = '<div class="empty"><span class="icon">⚠️</span>Не удалось определить профиль.<br>' +
       'Откройте бота в <b>официальном приложении Telegram</b>.' +
       '<br><span style="font-size:10px;opacity:.55">tg:' + (tg ? 'y' : 'n') +
-      ' · ' + (tg ? tg.platform : '?') + ' · initData:' + (tg ? (tg.initData || '').length : 0) + '</span></div>';
+      ' · ' + esc(tg ? tg.platform : '?') + ' · initData:' + (tg ? (tg.initData || '').length : 0) + '</span></div>';
     return;
   }
   chip.innerHTML = (USER_NAME ? '<b>' + esc(USER_NAME) + '</b> · ' : '') + 'id ' + TG_ID;
@@ -565,7 +566,7 @@ function initForm() {
       if (f.size > MAX_FILE_BYTES) { toast('Файл больше 20 МБ', true); imgInput.value = ''; return; }
       readAttachment(f)
         .then(function (res) { pendingImage = res.dataUrl; pendingFileName = res.name; renderImgPreview(f.type); })
-        .catch(function () { toast('Не удалось обработать файл', true); });
+        .catch(function (e) { toast(e && e.message ? e.message : 'Не удалось обработать файл', true); imgInput.value = ''; });
     });
   }
 
@@ -594,9 +595,17 @@ function loadImageScaled(file, maxDim, quality) {
   });
 }
 
+// Опасные типы (зеркало серверного блок-листа) — быстрая обратная связь, сервер всё равно проверяет.
+var BLOCKED_EXT_RE = /\.(html?|xhtml|shtml|mhtml|svg|exe|bat|cmd|com|scr|msi|dll|apk|jar|jse?|mjs|vbe?|ps1|sh|hta|wsf|reg|php\d?|phtml|pht)\s*$/i;
+var BLOCKED_MIME_RE = /^(text\/html|application\/xhtml\+xml|image\/svg\+xml|application\/javascript|text\/javascript|application\/x-sh|application\/x-msdownload|application\/x-httpd-php)$/i;
+function isDangerousFile(file) {
+  return (file.type && BLOCKED_MIME_RE.test(file.type)) || BLOCKED_EXT_RE.test(file.name || '');
+}
+
 // Готовит вложение к отправке: изображения сжимаем через canvas в JPEG,
 // остальные файлы читаем как есть (dataURL). Возвращает { dataUrl, name }.
 function readAttachment(file) {
+  if (isDangerousFile(file)) return Promise.reject(new Error('Такой тип файла нельзя прикреплять.'));
   if (file.type && file.type.indexOf('image/') === 0) {
     return loadImageScaled(file, 1280, 0.8).then(function (dataUrl) {
       var base = (file.name || 'image').replace(/\.[^.]+$/, '');
@@ -705,7 +714,7 @@ function renderAccess(requests, employees) {
     html += '<div class="cards">' + requests.map(function (r) {
       return '<div class="card">' +
         '<div class="card-top"><span class="ticket-no">' + esc(r.name || ('id ' + r.tg_id)) + '</span>' +
-        '<button class="btn btn-take" style="flex:0 0 auto;padding:8px 14px" onclick="approveAcc(\'' + esc(r.tg_id) + '\')">Одобрить</button></div>' +
+        '<button class="btn btn-take" style="flex:0 0 auto;padding:8px 14px" data-id="' + esc(r.tg_id) + '" onclick="approveAcc(this.dataset.id)">Одобрить</button></div>' +
         '<div class="card-meta"><span>id ' + esc(r.tg_id) + '</span><span>' + dateShort(r.date) + '</span></div>' +
         '</div>';
     }).join('') + '</div>';
@@ -717,7 +726,7 @@ function renderAccess(requests, employees) {
     html += '<div class="cards">' + employees.map(function (emp) {
       return '<div class="card">' +
         '<div class="card-top"><span class="ticket-no">' + esc(emp.name) + '</span>' +
-        '<button class="btn" style="flex:0 0 auto;padding:8px 14px;background:var(--red);color:#fff" onclick="revokeAcc(\'' + esc(emp.tg_id) + '\')">Закрыть доступ</button></div>' +
+        '<button class="btn" style="flex:0 0 auto;padding:8px 14px;background:var(--red);color:#fff" data-id="' + esc(emp.tg_id) + '" onclick="revokeAcc(this.dataset.id)">Закрыть доступ</button></div>' +
         '<div class="card-meta"><span>id ' + esc(emp.tg_id) + '</span></div>' +
         '</div>';
     }).join('') + '</div>';
@@ -832,23 +841,24 @@ function renderDetail(t) {
   var terminal = t.status === 'решена' || t.status === 'отклонена';
   var timerCls = running ? 'running' : (terminal ? 'done' : '');
 
+  var no = esc(t.number); // данные кладём в data-no, в onclick — только статичные литералы
   var actions = '';
   var secondary = '';
   if (isAdmin) {
     if (t.status === 'создана' || t.status === 'исправлена') {
-      actions = '<button class="btn btn-take" onclick="act(\'takeTicket\',\'' + t.number + '\')">Взять в работу</button>';
-      secondary = '<button class="btn btn-reject" onclick="openReason(\'' + t.number + '\',\'reject\')">Отклонить</button>';
+      actions = '<button class="btn btn-take" data-no="' + no + '" onclick="act(\'takeTicket\', this.dataset.no)">Взять в работу</button>';
+      secondary = '<button class="btn btn-reject" data-no="' + no + '" onclick="openReason(this.dataset.no, \'reject\')">Отклонить</button>';
     } else if (t.status === 'в работе' || t.status === 'на паузе') {
       actions = (t.status === 'в работе'
-          ? '<button class="btn btn-pause" onclick="act(\'pauseTicket\',\'' + t.number + '\')">Пауза</button>'
-          : '<button class="btn btn-resume" onclick="act(\'resumeTicket\',\'' + t.number + '\')">Продолжить</button>') +
-        '<button class="btn btn-finish" onclick="act(\'finishTicket\',\'' + t.number + '\')">Завершить</button>';
+          ? '<button class="btn btn-pause" data-no="' + no + '" onclick="act(\'pauseTicket\', this.dataset.no)">Пауза</button>'
+          : '<button class="btn btn-resume" data-no="' + no + '" onclick="act(\'resumeTicket\', this.dataset.no)">Продолжить</button>') +
+        '<button class="btn btn-finish" data-no="' + no + '" onclick="act(\'finishTicket\', this.dataset.no)">Завершить</button>';
       secondary =
-        '<button class="btn btn-pause" onclick="openTransfer(\'' + t.number + '\')">Передать</button>' +
-        '<button class="btn btn-revision" onclick="openReason(\'' + t.number + '\',\'revision\')">На доработку</button>' +
+        '<button class="btn btn-pause" data-no="' + no + '" onclick="openTransfer(this.dataset.no)">Передать</button>' +
+        '<button class="btn btn-revision" data-no="' + no + '" onclick="openReason(this.dataset.no, \'revision\')">На доработку</button>' +
         '<button class="btn btn-pause" onclick="document.getElementById(\'detail-image\').click()">' +
           (t.fileUrl ? 'Заменить файл' : 'Прикрепить файл') + '</button>' +
-        '<button class="btn btn-reject" onclick="openReason(\'' + t.number + '\',\'reject\')">Отклонить</button>';
+        '<button class="btn btn-reject" data-no="' + no + '" onclick="openReason(this.dataset.no, \'reject\')">Отклонить</button>';
     }
     // На доработке (ждёт сотрудника) и терминальные — действий у админа нет.
   }
@@ -878,7 +888,7 @@ function renderDetail(t) {
       '</div>' : '') +
     (actions ? '<div class="actions">' + actions + '</div>' : '') +
     (secondary ? '<div class="actions secondary">' + secondary + '</div>' : '') +
-    '<input type="file" id="detail-image" style="display:none" onchange="onDetailImage(\'' + t.number + '\')" />' +
+    '<input type="file" id="detail-image" data-no="' + no + '" style="display:none" onchange="onDetailImage(this.dataset.no)" />' +
     '<div id="actionPanel"></div>';
 
   lastDetailNo = t.number;
@@ -900,6 +910,8 @@ function reasonHTML(t) {
 // Вложение: миниатюра (для изображений/PDF) + ссылка на открытие файла.
 function fileHTML(t) {
   if (!t.fileUrl) return '';
+  // Рендерим только http(s)-ссылки — защита от javascript:/data: при ручной правке таблицы.
+  if (!/^https?:\/\//i.test(t.fileUrl)) return '';
   var id = driveId(t.fileUrl);
   var thumb = id ? 'https://drive.google.com/thumbnail?id=' + id + '&sz=w1000' : t.fileUrl;
   return '<div class="shot-wrap">' +
@@ -991,7 +1003,7 @@ function openTransfer(number) {
         '<select class="control" id="transferTo">' + opts + '</select></div>' +
       '<div class="actions">' +
         '<button class="btn btn-pause" onclick="closeActionPanel()">Отмена</button>' +
-        '<button class="btn btn-take" onclick="doTransfer(\'' + number + '\')">Передать</button>' +
+        '<button class="btn btn-take" data-no="' + esc(number) + '" onclick="doTransfer(this.dataset.no)">Передать</button>' +
       '</div>';
   }).catch(function (e) { panel.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; });
 }
@@ -1012,7 +1024,7 @@ function openReason(number, mode) {
       '<textarea class="control" id="reasonText" placeholder="Опишите, что не так с заявкой"></textarea></div>' +
     '<div class="actions">' +
       '<button class="btn btn-pause" onclick="closeActionPanel()">Отмена</button>' +
-      '<button class="btn ' + confirmCls + '" onclick="confirmReason(\'' + number + '\',\'' + mode + '\')">' + confirmLabel + '</button>' +
+      '<button class="btn ' + confirmCls + '" data-no="' + esc(number) + '" data-mode="' + esc(mode) + '" onclick="confirmReason(this.dataset.no, this.dataset.mode)">' + confirmLabel + '</button>' +
     '</div>';
   var ta = document.getElementById('reasonText');
   if (ta) ta.focus();
@@ -1074,7 +1086,7 @@ function renderRevisionView(t, cls) {
     (t.fileUrl ? '<div style="margin:-6px 2px 12px;font-size:12px;color:var(--muted)">Уже прикреплён файл — ' +
         '<a href="' + esc(t.fileUrl) + '" target="_blank" rel="noopener" style="color:var(--accent)">открыть</a>. Новый заменит его.</div>' : '') +
     '<div class="actions">' +
-      '<button class="btn btn-take" id="resubmitBtn" onclick="doResubmit(\'' + t.number + '\')">Отправить снова</button>' +
+      '<button class="btn btn-take" id="resubmitBtn" data-no="' + esc(t.number) + '" onclick="doResubmit(this.dataset.no)">Отправить снова</button>' +
     '</div>';
   revFile = ''; revFileName = '';
   lastDetailNo = t.number;
@@ -1115,7 +1127,7 @@ function onRevisionFile() {
     revFile = res.dataUrl; revFileName = res.name;
     if (label) label.textContent = '📎 Файл выбран';
     if (prev) prev.innerHTML = attachPreviewHTML(res, f.type);
-  }).catch(function () { toast('Не удалось обработать файл', true); });
+  }).catch(function (e) { toast(e && e.message ? e.message : 'Не удалось обработать файл', true); inp.value = ''; });
 }
 
 function doResubmit(number) {
@@ -1164,7 +1176,11 @@ function fmtMin(sec) {
   return p(Math.floor(sec / 60)) + ':' + p(sec % 60);
 }
 
-function driveId(url) { var m = String(url).match(/[-\w]{25,}/); return m ? m[0] : ''; }
+function driveId(url) {
+  var s = String(url);
+  var m = s.match(/\/d\/([-\w]{20,})/) || s.match(/[?&]id=([-\w]{20,})/);
+  return m ? m[1] : '';
+}
 
 // ============================ LIVE TIMER ============================
 // Для бегущих заявок прибавляем секунды, прошедшие с момента запроса.
