@@ -464,8 +464,8 @@ var lastDetailSig = '';        // сигнатура состояния заяв
 var GUEST_PENDING = false;     // гость уже отправил запрос на доступ
 
 var TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Перемещение', 'Оприходование'];
-var ADMIN_ONLY_TYPES = ['ТП'];
-function allTypes() { return ROLE === 'админ' ? TYPES.concat(ADMIN_ONLY_TYPES) : TYPES; }
+var ADMIN_ONLY_TYPES = [];
+function allTypes() { return TYPES; }
 
 var ADMIN_ONLY_OFFICES = { 'ТП': ['ТП'] };
 function allCities() {
