@@ -43,7 +43,7 @@ Mini App для подачи и обработки заявок. Стек как
 ### 4. Telegram-бот и уведомления
 1. У [@BotFather](https://t.me/BotFather): `/setmenubutton` (или Bot Settings → Menu Button) → вставь URL GitHub Pages как Mini App.
 2. **Уведомления в чат:** добавь бота в рабочий чат. Напиши там любое сообщение. Открой
-   `https://api.telegram.org/bot8778022467:AAHArqZM9Um92k7n5sQlQjaksDa5GNrWRG8/getUpdates`
+   `https://api.telegram.org/bot<ВАШ_ТОКЕН>/getUpdates`
    и возьми `chat.id` (для группы — отрицательное число). Впиши его в `NOTIFY_CHAT_ID` в `Code.gs` и **сделай новый деплой**.
 
 ### 5. Роли
