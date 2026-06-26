@@ -1,0 +1,1470 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Заявки</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --accent: var(--tg-theme-button-color, #3a8dff);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+
+    --red: #ef5350;
+    --amber: #f2b01e;
+    --green: #2ecc71;
+    --violet: #8b7cff;  /* на доработке */
+    --cyan: #2bb8d6;    /* исправлена */
+    --grayd: #7a8290;   /* отклонена */
+
+    --radius: 16px;
+    --radius-sm: 10px;
+    --space: 16px;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+    /* Тёмная тема (по умолчанию). Структурные цвета фиксированы по теме,
+       чтобы не было рассинхрона «белый фон + тёмные карточки». */
+    --bg: #0f1115;
+    --bg-soft: #1a1d24;
+    --surface: #20242d;
+    --surface-2: #272c37;
+    --text: #f2f4f8;
+    --muted: #8b93a3;
+    --line: rgba(255,255,255,0.08);
+  }
+  [data-theme="light"] {
+    --bg: #eceef2;
+    --bg-soft: #ffffff;
+    --surface: #ffffff;
+    --surface-2: #eef1f5;
+    --text: #11151c;
+    --muted: #5c6470;
+    --line: rgba(0,0,0,0.10);
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.45;
+    padding-bottom: 40px;
+  }
+
+  /* ---------- Header ---------- */
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+    padding: 14px var(--space) 10px;
+  }
+  .topbar h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+  .role-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-top: 4px; font-size: 12px; color: var(--muted);
+  }
+  .role-chip b { color: var(--text); font-weight: 600; }
+
+  .theme-toggle {
+    position: absolute; top: 12px; right: 14px;
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 1px solid var(--line); background: var(--surface);
+    color: var(--text); font-size: 15px; line-height: 1; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background .2s, transform .1s;
+  }
+  .theme-toggle:active { transform: scale(.92); }
+
+  /* ---------- Tabs ---------- */
+  .tabs {
+    display: flex; gap: 6px; margin-top: 12px;
+    background: var(--bg-soft); padding: 4px; border-radius: 12px;
+  }
+  .tab {
+    flex: 1; text-align: center; padding: 9px 8px; border-radius: 9px;
+    font-size: 13px; font-weight: 600; color: var(--muted);
+    background: transparent; border: none; cursor: pointer;
+    transition: background var(--ease) .25s, color var(--ease) .25s;
+  }
+  .tab.active { background: var(--surface-2); color: var(--text); }
+
+  /* ---------- Layout ---------- */
+  .screen { padding: var(--space); display: none; }
+  .screen.active { display: block; animation: fade .3s var(--ease); }
+  @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  .section-title {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin: 4px 2px 12px;
+  }
+
+  /* ---------- Form ---------- */
+  .field { margin-bottom: 14px; }
+  .field label {
+    display: block; font-size: 12px; font-weight: 600;
+    color: var(--muted); margin-bottom: 6px; padding-left: 2px;
+  }
+  .control {
+    width: 100%; padding: 13px 14px; font-size: 15px;
+    color: var(--text); background: var(--surface);
+    border: 1px solid var(--line); border-radius: var(--radius-sm);
+    outline: none; transition: border-color .2s, background .2s;
+    appearance: none; -webkit-appearance: none; font-family: inherit;
+  }
+  .control:focus { border-color: var(--accent); background: var(--surface-2); }
+  .control::placeholder { color: var(--muted); opacity: .65; }
+  select.control {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%238b93a3' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 14px center;
+    padding-right: 36px;
+  }
+  select.control:disabled { opacity: .5; }
+  textarea.control { resize: vertical; min-height: 110px; line-height: 1.5; }
+
+  .submit {
+    width: 100%; padding: 15px; margin-top: 6px; font-size: 16px; font-weight: 700;
+    color: var(--accent-text); background: var(--accent);
+    border: none; border-radius: var(--radius-sm); cursor: pointer;
+    transition: opacity .2s, transform .1s;
+  }
+  .submit:disabled { opacity: .35; cursor: not-allowed; }
+  .submit:active:not(:disabled) { transform: scale(.985); }
+
+  /* ---------- Ticket cards ---------- */
+  .cards { display: flex; flex-direction: column; gap: 10px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-left: 4px solid var(--muted); border-radius: var(--radius);
+    padding: 14px; cursor: pointer;
+    transition: transform .12s var(--ease), background .2s;
+  }
+  .card:active { transform: scale(.99); }
+  .card.s-new   { border-left-color: var(--red);   background: linear-gradient(90deg, color-mix(in srgb, var(--red) 9%, var(--surface)), var(--surface) 55%); }
+  .card.s-work  { border-left-color: var(--amber); background: linear-gradient(90deg, color-mix(in srgb, var(--amber) 9%, var(--surface)), var(--surface) 55%); }
+  .card.s-pause { border-left-color: var(--amber); }
+  .card.s-done  { border-left-color: var(--green); background: linear-gradient(90deg, color-mix(in srgb, var(--green) 8%, var(--surface)), var(--surface) 55%); }
+  .card.s-revision { border-left-color: var(--violet); background: linear-gradient(90deg, color-mix(in srgb, var(--violet) 11%, var(--surface)), var(--surface) 55%); }
+  .card.s-fixed    { border-left-color: var(--cyan);   background: linear-gradient(90deg, color-mix(in srgb, var(--cyan) 10%, var(--surface)), var(--surface) 55%); }
+  .card.s-rejected { border-left-color: var(--grayd); opacity: .82; }
+
+  .card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .ticket-no { font-weight: 700; font-size: 15px; letter-spacing: .5px; font-variant-numeric: tabular-nums; }
+  .badge {
+    font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px;
+    display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  }
+  .badge::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .badge.s-new   { color: var(--red);   background: color-mix(in srgb, var(--red) 16%, transparent); }
+  .badge.s-work  { color: var(--amber); background: color-mix(in srgb, var(--amber) 16%, transparent); }
+  .badge.s-pause { color: var(--amber); background: color-mix(in srgb, var(--amber) 16%, transparent); }
+  .badge.s-done  { color: var(--green); background: color-mix(in srgb, var(--green) 16%, transparent); }
+  .badge.s-revision { color: var(--violet); background: color-mix(in srgb, var(--violet) 16%, transparent); }
+  .badge.s-fixed    { color: var(--cyan);   background: color-mix(in srgb, var(--cyan) 16%, transparent); }
+  .badge.s-rejected { color: var(--grayd);  background: color-mix(in srgb, var(--grayd) 18%, transparent); }
+
+  .card-meta { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 10px; }
+  .card-desc { margin-top: 8px; font-size: 14px; color: var(--text);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .card-timer { margin-top: 8px; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--amber); }
+  .card.s-done .card-timer { color: var(--green); }
+
+  /* ---------- Detail overlay ---------- */
+  .overlay {
+    position: fixed; inset: 0; z-index: 50; display: none;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(2px);
+    align-items: flex-end; justify-content: center;
+  }
+  .overlay.open { display: flex; animation: fade .2s var(--ease); }
+  .sheet {
+    width: 100%; max-width: 560px; background: var(--bg-soft);
+    border-radius: 22px 22px 0 0; padding: 8px 18px 26px;
+    max-height: 90vh; overflow-y: auto; animation: slideup .3s var(--ease);
+  }
+  @keyframes slideup { from { transform: translateY(100%); } to { transform: none; } }
+  .grabber { width: 40px; height: 4px; border-radius: 999px; background: var(--line); margin: 6px auto 14px; }
+
+  .detail-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  .detail-head .ticket-no { font-size: 22px; }
+  .detail-row { display: flex; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+  .detail-row .k { color: var(--muted); flex: 0 0 130px; }
+  .detail-row .v { color: var(--text); flex: 1; font-weight: 500; }
+  .detail-desc { margin: 14px 0; padding: 14px; background: var(--surface);
+    border-radius: var(--radius-sm); font-size: 15px; line-height: 1.5; white-space: pre-wrap; }
+
+  .timer-box { text-align: center; margin: 18px 0 8px; }
+  .timer-box .t { font-size: 40px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: 1px; }
+  .timer-box .l { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+  .timer-box.running .t { color: var(--amber); }
+  .timer-box.done .t { color: var(--green); }
+
+  .actions { display: flex; gap: 10px; margin-top: 18px; }
+  .btn {
+    flex: 1; padding: 14px; font-size: 15px; font-weight: 700; border: none;
+    border-radius: var(--radius-sm); cursor: pointer; color: #fff;
+    transition: transform .1s, opacity .2s; font-family: inherit;
+  }
+  .btn:active { transform: scale(.98); }
+  .btn-take   { background: var(--accent); color: var(--accent-text); }
+  .btn-pause  { background: var(--surface-2); color: var(--text); border: 1px solid var(--line); }
+  .btn-resume { background: var(--amber); color: #1a1400; }
+  .btn-finish { background: var(--green); color: #04210f; }
+
+  .filebtn {
+    display: block; padding: 13px 14px; text-align: center; cursor: pointer;
+    color: var(--muted); background: var(--surface);
+    border: 1px dashed var(--line); border-radius: var(--radius-sm);
+    transition: border-color .2s, color .2s;
+  }
+  .filebtn:active { border-color: var(--accent); color: var(--text); }
+  #imgPreview img, .shot { max-width: 100%; display: block; margin-top: 8px;
+    border-radius: 10px; border: 1px solid var(--line); }
+  .img-clear { margin-top: 6px; background: none; border: none; color: var(--red);
+    cursor: pointer; font-size: 13px; font-family: inherit; }
+  .shot-wrap { margin: 12px 0; }
+  .shot-wrap a { display: inline-block; margin-top: 6px; font-size: 13px; color: var(--accent); text-decoration: none; }
+  .actions.secondary { margin-top: 10px; flex-wrap: wrap; }
+  .btn-revision { background: var(--violet); color: #1a1330; }
+  .btn-reject   { background: color-mix(in srgb, var(--red) 22%, var(--surface)); color: var(--red); border: 1px solid color-mix(in srgb, var(--red) 40%, transparent); }
+
+  /* Файл-вложение (не изображение) */
+  .file-chip { display: flex; align-items: center; gap: 10px; margin: 12px 0; padding: 12px 14px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm);
+    text-decoration: none; color: var(--text); }
+  .file-chip .ico { font-size: 22px; flex: 0 0 auto; }
+  .file-chip .nm { font-size: 13px; color: var(--accent); word-break: break-all; }
+
+  /* Блок основания доработки/отклонения */
+  .reason-box { margin: 12px 0; padding: 12px 14px; border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--violet) 10%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--violet) 32%, transparent); }
+  .reason-box .l { font-size: 11px; font-weight: 700; color: var(--violet);
+    text-transform: uppercase; letter-spacing: .06em; margin-bottom: 5px; }
+  .reason-box .v { white-space: pre-wrap; font-size: 14px; line-height: 1.45; }
+  .reason-box.reject { background: color-mix(in srgb, var(--red) 9%, var(--surface));
+    border-color: color-mix(in srgb, var(--red) 32%, transparent); }
+  .reason-box.reject .l { color: var(--red); }
+
+  /* ---------- States ---------- */
+  .empty { text-align: center; color: var(--muted); padding: 48px 20px; font-size: 14px; }
+  .empty .icon { font-size: 34px; opacity: .5; display: block; margin-bottom: 10px; }
+  .toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(20px);
+    background: var(--surface-2); color: var(--text); padding: 12px 20px; border-radius: 12px;
+    font-size: 14px; font-weight: 600; box-shadow: 0 8px 30px rgba(0,0,0,.4);
+    opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s; z-index: 100;
+    border: 1px solid var(--line);
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.err { border-color: var(--red); color: var(--red); }
+
+  .loader { text-align: center; padding: 40px; color: var(--muted); }
+
+  /* ---------- Access cards (доступы) ---------- */
+  .acc-card { display: flex; align-items: center; gap: 12px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 12px; }
+  .acc-main { flex: 1 1 auto; min-width: 0; }
+  .acc-name { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .acc-sub { font-size: 12px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .acc-actions { display: flex; flex-direction: column; gap: 6px; flex: 0 0 auto; }
+  .acc-actions .btn { flex: 0 0 auto; padding: 8px 12px; font-size: 13px; }
+  .acc-rename { flex: 1 1 auto; min-width: 0; }
+  .acc-rename .control { padding: 9px 12px; }
+  .avatar { width: 42px; height: 42px; flex: 0 0 auto; border-radius: 50%;
+    position: relative; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; }
+  .avatar .ini { color: #fff; font-weight: 700; font-size: 15px; }
+  .avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .link-btn { background: none; border: none; color: var(--accent); font-size: 12px;
+    font-weight: 600; cursor: pointer; padding: 2px 4px; font-family: inherit; text-transform: none; letter-spacing: 0; }
+  .link-btn:active { opacity: .6; }
+
+  /* ---------- Lightbox ---------- */
+  .lightbox {
+    position: fixed; inset: 0; z-index: 300;
+    background: rgba(0,0,0,.94);
+    display: none; align-items: center; justify-content: center;
+    cursor: zoom-out; padding: 16px;
+  }
+  .lightbox.open { display: flex; animation: fade .2s var(--ease); }
+  .lightbox img {
+    max-width: 100%; max-height: 100%; object-fit: contain;
+    border-radius: 8px; pointer-events: none;
+  }
+  .lightbox-close {
+    position: absolute; top: 14px; right: 14px;
+    width: 36px; height: 36px; border-radius: 50%;
+    background: rgba(255,255,255,.12); border: none; color: #fff;
+    font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .shot.clickable { cursor: zoom-in; }
+</style>
+<script>
+// Тему ставим как можно раньше (до отрисовки), чтобы не было вспышки чужого фона.
+(function () {
+  var t = '';
+  try { t = localStorage.getItem('ticket_theme') || ''; } catch (e) {}
+  if (!t) {
+    var tg = window.Telegram && window.Telegram.WebApp;
+    t = (tg && tg.colorScheme) ||
+        ((window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark');
+  }
+  document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+})();
+</script>
+</head>
+<body>
+
+<div class="topbar">
+  <button id="themeToggle" class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Сменить тему">🌙</button>
+  <h1 id="appTitle">Заявки</h1>
+  <div class="role-chip" id="roleChip"></div>
+  <div class="tabs" id="tabs"></div>
+</div>
+
+<!-- ===== Employee: new ticket ===== -->
+<section class="screen" id="screen-new">
+  <form id="ticketForm" autocomplete="off">
+    <div class="field">
+      <label>Тип заявки</label>
+      <select class="control" id="f-type" required>
+        <option value="" disabled selected>Выберите тип</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Город</label>
+      <select class="control" id="f-city" required>
+        <option value="" disabled selected>Выберите город</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Офис</label>
+      <select class="control" id="f-office" required disabled>
+        <option value="" disabled selected>Сначала выберите город</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Имя отправителя</label>
+      <input class="control" id="f-name" type="text" placeholder="Введите ваше имя" required />
+    </div>
+    <div class="field">
+      <label>Описание проблемы</label>
+      <textarea class="control" id="f-desc" placeholder="Введите описание проблемы" required></textarea>
+    </div>
+    <div class="field">
+      <label>Файл (необязательно)</label>
+      <label class="filebtn" id="fileLabel" for="f-image">📎 Прикрепить файл</label>
+      <input type="file" id="f-image" hidden />
+      <div id="imgPreview"></div>
+    </div>
+    <button class="submit" id="submitBtn" type="submit" disabled>Отправить заявку</button>
+  </form>
+</section>
+
+<!-- ===== Employee: my tickets ===== -->
+<section class="screen" id="screen-mine">
+  <div class="section-title">Мои заявки</div>
+  <div class="cards" id="mineList"><div class="loader">Загрузка…</div></div>
+</section>
+
+<!-- ===== Admin: active tickets ===== -->
+<section class="screen" id="screen-admin">
+  <div class="section-title">Активные заявки</div>
+  <div class="cards" id="adminList"><div class="loader">Загрузка…</div></div>
+</section>
+
+<!-- ===== Admin: history ===== -->
+<section class="screen" id="screen-history">
+  <div class="section-title">История решённых заявок</div>
+  <div class="cards" id="historyList"><div class="loader">Загрузка…</div></div>
+</section>
+
+<!-- ===== Admin: access management ===== -->
+<section class="screen" id="screen-access">
+  <div id="accessBody"><div class="loader">Загрузка…</div></div>
+</section>
+
+<!-- ===== Guest: no access yet ===== -->
+<section class="screen" id="screen-guest">
+  <div id="guestBody"></div>
+</section>
+
+<!-- ===== Detail overlay ===== -->
+<div class="overlay" id="overlay">
+  <div class="sheet" id="sheet"><div class="grabber"></div><div id="detailBody"></div></div>
+</div>
+
+<div class="lightbox" id="lightbox" onclick="closeLightbox()">
+  <button class="lightbox-close" onclick="closeLightbox()" aria-label="Закрыть">✕</button>
+  <img id="lightboxImg" src="" alt="вложение" />
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ============================ CONFIG ============================
+// Вставь сюда URL веб-приложения Apps Script (Deploy → Web app).
+var API_URL = 'https://script.google.com/macros/s/AKfycbwJVW25R_xLRM_BPiUjvEC0BAS9vf-KKMaFlGm_O8jJAn8myOiFjrlp-U5TJ6ETzcb6YQ/exec';
+
+// ============================ DATA ============================
+var OFFICES = {
+  'Магнитогорск':  ['КМ68', 'КМ142', 'КМ198', 'КМ222', 'МГН5', 'МГН6'],
+  'Челябинск':     ['К3', 'Че4', 'Че2', 'ЧеЦ'],
+  'Екатеринбург':  ['ЕКБ1', 'ЕКБ2', 'ЕКБ4', 'ЕКБ5', 'ЕКБ7', 'ЕКБ8', 'ЕКБ9', 'ЕКБ10', 'ЕКБ11'],
+  'Нижний Тагил':  ['НТ1'],
+  'Пермь':         ['П1', 'П2', 'П4', 'П5'],
+  'Омск':          ['ОМ1', 'ОМ2', 'ОМ3', 'ОМ4'],
+  'Красноярск':    ['КР1', 'КР2'],
+  'Барнаул':       ['БР1', 'БР2', 'БР3'],
+  'Кемерово':      ['КМР1']
+};
+
+var STATUS_CLASS = {
+  'создана': 's-new', 'в работе': 's-work', 'на паузе': 's-pause', 'решена': 's-done',
+  'на доработке': 's-revision', 'исправлена': 's-fixed', 'отклонена': 's-rejected'
+};
+var STATUS_LABEL = {
+  'создана': 'Создана', 'в работе': 'В работе', 'на паузе': 'На паузе', 'решена': 'Решена',
+  'на доработке': 'Отправлен на доработку', 'исправлена': 'Исправлена', 'отклонена': 'Заявка отклонена'
+};
+// статусы с накопленным временем (показываем таймер; «в работе» — живой, остальные — застывший)
+var STATUS_HAS_TIME = { 'в работе': 1, 'на паузе': 1, 'решена': 1, 'на доработке': 1, 'исправлена': 1, 'отклонена': 1 };
+
+// ============================ STATE ============================
+var tg = null;
+var USER = null;
+var TG_ID = '';
+var ROLE = 'сотрудник';
+var USER_NAME = '';
+
+function readUser() {
+  if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
+    USER = tg.initDataUnsafe.user;
+    TG_ID = String(USER.id);
+    USER_NAME = [USER.first_name, USER.last_name].filter(Boolean).join(' ');
+  }
+}
+
+var currentView = '';
+var pollTimer = null;
+var tickTimer = null;
+var ticketCache = {};          // number -> ticket
+var cacheFetchedAt = 0;        // performance.now() of last fetch
+var openTicketNo = null;       // number of ticket open in overlay
+var viewTickets = [];          // последний показанный список (для оптимистичной перерисовки)
+var viewContainerId = '';      // контейнер текущего списка
+var pendingImage = '';         // dataURL прикреплённого к новой заявке файла
+var pendingFileName = '';      // исходное имя прикреплённого файла (новая заявка)
+var revFile = '';              // dataURL файла при доработке заявки сотрудником
+var revFileName = '';          // исходное имя файла при доработке
+var lastDetailNo = null;       // для какой заявки последний раз рисовали детали
+var lastDetailSig = '';        // сигнатура состояния заявки (чтобы не перерисовывать зря)
+var GUEST_PENDING = false;     // гость уже отправил запрос на доступ
+
+var TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Перемещение', 'Оприходование'];
+var ADMIN_ONLY_TYPES = [];
+function allTypes() { return TYPES; }
+
+var ADMIN_ONLY_OFFICES = { 'ТП': ['ТП'] };
+function allCities() {
+  var cities = Object.keys(OFFICES);
+  if (ROLE === 'админ') cities = cities.concat(Object.keys(ADMIN_ONLY_OFFICES));
+  return cities;
+}
+function getOfficesForCity(city) { return OFFICES[city] || ADMIN_ONLY_OFFICES[city] || []; }
+var MAX_FILE_BYTES = 20 * 1024 * 1024; // потолок размера вложения (20 МБ)
+
+// ============================ API ============================
+function api(action, payload) {
+  payload = payload || {};
+  payload.action = action;
+  payload.tg_id = TG_ID; // подсказка для UI; сервер доверяет только подписанному init_data
+  payload.init_data = (tg && tg.initData) || '';
+  if (!API_URL) return Promise.reject(new Error('API_URL не задан в index.html'));
+  return fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+      if (!res.success) throw new Error(res.error || 'Ошибка сервера');
+      return res.data;
+    });
+}
+
+// ============================ THEME ============================
+var themeInited = false;
+function initTheme() {
+  if (themeInited) return;
+  themeInited = true;
+  var saved = '';
+  try { saved = localStorage.getItem('ticket_theme') || ''; } catch (e) {}
+  applyTheme(saved || (tg && tg.colorScheme) || currentTheme());
+  // Если пользователь не выбирал тему вручную — следуем за Telegram.
+  if (tg && tg.onEvent) {
+    try {
+      tg.onEvent('themeChanged', function () {
+        var manual = '';
+        try { manual = localStorage.getItem('ticket_theme') || ''; } catch (e) {}
+        if (!manual && tg.colorScheme) applyTheme(tg.colorScheme);
+      });
+    } catch (e) {}
+  }
+}
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+}
+function applyTheme(theme) {
+  theme = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', theme);
+  var b = document.getElementById('themeToggle');
+  if (b) b.textContent = theme === 'light' ? '☀️' : '🌙';
+}
+function toggleTheme() {
+  var next = currentTheme() === 'light' ? 'dark' : 'light';
+  try { localStorage.setItem('ticket_theme', next); } catch (e) {}
+  applyTheme(next);
+}
+
+// ============================ BOOT ============================
+function boot() { applyTheme(currentTheme()); waitForTelegram(0); }
+
+// Ждём появления Telegram.WebApp и данных пользователя: SDK/ initData могут
+// прийти с задержкой (медленная сеть, особенности клиента). До ~3 секунд.
+function waitForTelegram(attempt) {
+  if (window.Telegram && window.Telegram.WebApp) {
+    tg = window.Telegram.WebApp;
+    try { tg.ready(); } catch (e) {}
+    try { tg.expand(); } catch (e) {}
+    readUser();
+  }
+  if (!TG_ID && attempt < 15) {
+    setTimeout(function () { waitForTelegram(attempt + 1); }, 200);
+    return;
+  }
+  initTheme();
+  loadRole();
+}
+
+function loadRole() {
+  api('getRole', {})
+    .then(function (data) {
+      ROLE = data.role || 'гость';
+      GUEST_PENDING = !!data.pending;
+      if (data.name) USER_NAME = data.name;
+      buildUI();
+    })
+    .catch(function (e) {
+      ROLE = 'гость';   // при ошибке доступ не выдаём
+      buildUI();
+      if (API_URL) toast(e.message, true);
+    });
+}
+
+function buildUI() {
+  var roleChip = document.getElementById('roleChip');
+  var tabsEl = document.getElementById('tabs');
+  tabsEl.innerHTML = '';
+
+  if (ROLE === 'админ') {
+    document.getElementById('appTitle').textContent = 'Панель заявок';
+    roleChip.innerHTML = 'Режим: <b>Администратор</b> · id ' + (TG_ID || '—');
+    addTab('admin', 'Заявки');
+    addTab('history', 'История');
+    addTab('access', 'Доступы');
+    addTab('new', 'Создать');
+    initForm();
+    switchView('admin');
+  } else if (ROLE === 'сотрудник') {
+    document.getElementById('appTitle').textContent = 'Заявки';
+    var prefill = document.getElementById('f-name');
+    if (USER_NAME && prefill && !prefill.value) prefill.value = USER_NAME;
+    roleChip.innerHTML = 'Сотрудник' + (USER_NAME ? ': <b>' + esc(USER_NAME) + '</b>' : '') + ' · id ' + TG_ID;
+    addTab('new', 'Новая заявка');
+    addTab('mine', 'Мои заявки');
+    initForm();
+    switchView('new');
+  } else {
+    renderGuest();
+  }
+}
+
+// Экран для тех, у кого ещё нет доступа.
+function renderGuest() {
+  document.getElementById('appTitle').textContent = 'Доступ к боту';
+  document.getElementById('tabs').innerHTML = '';
+  var chip = document.getElementById('roleChip');
+  var g = document.getElementById('guestBody');
+  showOnly('guest');
+
+  if (!TG_ID) {
+    chip.innerHTML = '<span style="color:var(--amber)">Профиль не определён</span>';
+    g.innerHTML = '<div class="empty"><span class="icon">⚠️</span>Не удалось определить профиль.<br>' +
+      'Откройте бота в <b>официальном приложении Telegram</b>.' +
+      '<br><span style="font-size:10px;opacity:.55">tg:' + (tg ? 'y' : 'n') +
+      ' · ' + esc(tg ? tg.platform : '?') + ' · initData:' + (tg ? (tg.initData || '').length : 0) + '</span></div>';
+    return;
+  }
+  chip.innerHTML = (USER_NAME ? '<b>' + esc(USER_NAME) + '</b> · ' : '') + 'id ' + TG_ID;
+  if (GUEST_PENDING) {
+    g.innerHTML = '<div class="empty"><span class="icon">⏳</span>Запрос на доступ отправлен.<br>' +
+      'Ожидайте подтверждения администратора, затем откройте приложение заново.</div>';
+  } else {
+    g.innerHTML = '<div class="empty"><span class="icon">🔒</span>Доступ к боту ещё не открыт.</div>' +
+      '<button class="submit" id="reqBtn" onclick="sendAccessRequest()">Запросить доступ</button>';
+  }
+}
+
+function sendAccessRequest() {
+  var b = document.getElementById('reqBtn');
+  if (b) { b.disabled = true; b.textContent = 'Отправка…'; }
+  api('requestAccess', { name: USER_NAME }).then(function () {
+    GUEST_PENDING = true; renderGuest(); toast('Запрос на доступ отправлен');
+  }).catch(function (e) {
+    toast(e.message, true);
+    if (b) { b.disabled = false; b.textContent = 'Запросить доступ'; }
+  });
+}
+
+function showOnly(view) {
+  var screens = document.querySelectorAll('.screen');
+  for (var i = 0; i < screens.length; i++) screens[i].classList.remove('active');
+  var el = document.getElementById('screen-' + view);
+  if (el) el.classList.add('active');
+}
+
+function addTab(view, label) {
+  var b = document.createElement('button');
+  b.className = 'tab'; b.textContent = label; b.dataset.view = view;
+  b.onclick = function () { switchView(view); };
+  document.getElementById('tabs').appendChild(b);
+}
+
+function switchView(view) {
+  currentView = view;
+  var screens = document.querySelectorAll('.screen');
+  for (var i = 0; i < screens.length; i++) screens[i].classList.remove('active');
+  var el = document.getElementById('screen-' + view);
+  if (el) el.classList.add('active');
+  var tabs = document.querySelectorAll('.tab');
+  for (var j = 0; j < tabs.length; j++) tabs[j].classList.toggle('active', tabs[j].dataset.view === view);
+
+  stopPolling();
+  if (view === 'mine')    { refreshMine(); startPolling(refreshMine); }
+  if (view === 'admin')   { refreshAdmin(); startPolling(refreshAdmin); }
+  if (view === 'history') { refreshHistory(); }
+  if (view === 'access')  { refreshAccess(); startPolling(refreshAccess); }
+}
+
+function startPolling(fn) { stopPolling(); pollTimer = setInterval(fn, 4000); }
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+// ============================ FORM ============================
+function initForm() {
+  var typeSelect = document.getElementById('f-type');
+  if (typeSelect.options.length <= 1) {
+    allTypes().forEach(function (tp) {
+      var o = document.createElement('option'); o.value = tp; o.textContent = tp; typeSelect.appendChild(o);
+    });
+  }
+
+  var city = document.getElementById('f-city');
+  if (city.options.length <= 1) {
+    allCities().forEach(function (c) {
+      var o = document.createElement('option'); o.value = c; o.textContent = c; city.appendChild(o);
+    });
+  }
+  var office = document.getElementById('f-office');
+  city.onchange = function () {
+    office.innerHTML = '<option value="" disabled selected>Выберите офис</option>';
+    getOfficesForCity(city.value).forEach(function (of) {
+      var o = document.createElement('option'); o.value = of; o.textContent = of; office.appendChild(o);
+    });
+    office.disabled = false;
+    validateForm();
+  };
+
+  ['f-type', 'f-office', 'f-name', 'f-desc'].forEach(function (id) {
+    document.getElementById(id).addEventListener('input', validateForm);
+    document.getElementById(id).addEventListener('change', validateForm);
+  });
+
+  var imgInput = document.getElementById('f-image');
+  if (imgInput && !imgInput._wired) {
+    imgInput._wired = true;
+    imgInput.addEventListener('change', function () {
+      var f = imgInput.files && imgInput.files[0];
+      if (!f) { pendingImage = ''; pendingFileName = ''; renderImgPreview(); return; }
+      if (f.size > MAX_FILE_BYTES) { toast('Файл больше 20 МБ', true); imgInput.value = ''; return; }
+      readAttachment(f)
+        .then(function (res) { pendingImage = res.dataUrl; pendingFileName = res.name; renderImgPreview(f.type); })
+        .catch(function (e) { toast(e && e.message ? e.message : 'Не удалось обработать файл', true); imgInput.value = ''; });
+    });
+  }
+
+  document.getElementById('ticketForm').addEventListener('submit', submitTicket);
+}
+
+// Загружает файл изображения и масштабирует через canvas → JPEG dataURL (компактно).
+function loadImageScaled(file, maxDim, quality) {
+  return new Promise(function (resolve, reject) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var img = new Image();
+      img.onload = function () {
+        var scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        var cw = Math.round(img.width * scale), ch = Math.round(img.height * scale);
+        var canvas = document.createElement('canvas');
+        canvas.width = cw; canvas.height = ch;
+        canvas.getContext('2d').drawImage(img, 0, 0, cw, ch);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// Опасные типы (зеркало серверного блок-листа) — быстрая обратная связь, сервер всё равно проверяет.
+var BLOCKED_EXT_RE = /\.(html?|xhtml|shtml|mhtml|svg|exe|bat|cmd|com|scr|msi|dll|apk|jar|jse?|mjs|vbe?|ps1|sh|hta|wsf|reg|php\d?|phtml|pht)\s*$/i;
+var BLOCKED_MIME_RE = /^(text\/html|application\/xhtml\+xml|image\/svg\+xml|application\/javascript|text\/javascript|application\/x-sh|application\/x-msdownload|application\/x-httpd-php)$/i;
+function isDangerousFile(file) {
+  return (file.type && BLOCKED_MIME_RE.test(file.type)) || BLOCKED_EXT_RE.test(file.name || '');
+}
+
+// Готовит вложение к отправке: изображения сжимаем через canvas в JPEG,
+// остальные файлы читаем как есть (dataURL). Возвращает { dataUrl, name }.
+function readAttachment(file) {
+  if (isDangerousFile(file)) return Promise.reject(new Error('Такой тип файла нельзя прикреплять.'));
+  if (file.type && file.type.indexOf('image/') === 0) {
+    return loadImageScaled(file, 1280, 0.8).then(function (dataUrl) {
+      var base = (file.name || 'image').replace(/\.[^.]+$/, '');
+      return { dataUrl: dataUrl, name: base + '.jpg' };
+    });
+  }
+  return readFileDataUrl(file).then(function (dataUrl) {
+    return { dataUrl: dataUrl, name: file.name || 'file' };
+  });
+}
+
+function readFileDataUrl(file) {
+  return new Promise(function (resolve, reject) {
+    var r = new FileReader();
+    r.onload = function () { resolve(r.result); };
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+// Превью выбранного вложения: картинка — миниатюрой, иначе — имя файла.
+function attachPreviewHTML(res, mimeType) {
+  if (mimeType && mimeType.indexOf('image/') === 0) {
+    return '<img src="' + res.dataUrl + '" alt="превью" />';
+  }
+  return '<div class="file-chip"><span class="ico">📄</span><span class="nm">' + esc(res.name) + '</span></div>';
+}
+
+function renderImgPreview(mimeType) {
+  var el = document.getElementById('imgPreview');
+  var label = document.getElementById('fileLabel');
+  if (!el) return;
+  if (!pendingImage) {
+    el.innerHTML = '';
+    if (label) label.textContent = '📎 Прикрепить файл';
+    return;
+  }
+  el.innerHTML = attachPreviewHTML({ dataUrl: pendingImage, name: pendingFileName }, mimeType) +
+    '<button type="button" class="img-clear" onclick="clearImage()">Удалить файл</button>';
+  if (label) label.textContent = '📎 Файл прикреплён';
+}
+
+function clearImage() {
+  pendingImage = '';
+  pendingFileName = '';
+  var i = document.getElementById('f-image'); if (i) i.value = '';
+  renderImgPreview();
+}
+
+function validateForm() {
+  var ok = val('f-type') && val('f-city') && val('f-office') && val('f-name') && val('f-desc');
+  document.getElementById('submitBtn').disabled = !ok;
+}
+function val(id) { return document.getElementById(id).value.trim(); }
+
+function submitTicket(e) {
+  e.preventDefault();
+  var btn = document.getElementById('submitBtn');
+  btn.disabled = true; btn.textContent = 'Отправка…';
+  api('createTicket', {
+    type: val('f-type'), city: val('f-city'), office: val('f-office'),
+    name: val('f-name'), description: val('f-desc'),
+    image: pendingImage || undefined, filename: pendingFileName || undefined
+  }).then(function (data) {
+    toast('Заявка ' + data.ticket.number + ' создана');
+    document.getElementById('ticketForm').reset();
+    document.getElementById('f-office').disabled = true;
+    clearImage();
+    if (USER_NAME) document.getElementById('f-name').value = USER_NAME;
+    btn.textContent = 'Отправить заявку';
+    if (ROLE !== 'админ') switchView('mine');
+  }).catch(function (err) {
+    toast(err.message, true);
+    btn.disabled = false; btn.textContent = 'Отправить заявку';
+  });
+}
+
+// ============================ LISTS ============================
+function refreshMine() {
+  api('getMyTickets', {}).then(function (d) { renderList('mineList', d.tickets, false); })
+    .catch(function (e) { listError('mineList', e); });
+}
+function refreshAdmin() {
+  api('getTickets', {}).then(function (d) { renderList('adminList', d.tickets, true); })
+    .catch(function (e) { listError('adminList', e); });
+}
+function refreshHistory() {
+  api('getHistory', {}).then(function (d) { renderList('historyList', d.tickets, true); })
+    .catch(function (e) { listError('historyList', e); });
+}
+
+// ============================ ACCESS (админ) ============================
+var renamingId = '';        // id сотрудника, которого сейчас переименовывают
+var lastAccReq = [], lastAccEmp = []; // последний показанный список (для перерисовки без сети)
+
+function refreshAccess() {
+  renamingId = ''; // свежая загрузка/повторный вход — сбрасываем режим правки
+  api('getAccess', {}).then(function (d) {
+    renderAccess(d.requests || [], d.employees || []);
+  }).catch(function (e) {
+    document.getElementById('accessBody').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  });
+}
+
+// Идентификатор: @ник, иначе id (запасной вариант, если ника нет).
+function acctId(o) { return o.username ? '@' + o.username : 'id ' + o.tg_id; }
+
+function initialsFrom(s) {
+  s = String(s || '').replace(/^@/, '').trim();
+  if (!s) return '?';
+  var p = s.split(/\s+/);
+  return ((p[0].charAt(0) || '') + (p.length > 1 ? p[1].charAt(0) : '')).toUpperCase() || '?';
+}
+function avatarColor(seed) {
+  seed = String(seed || '?'); var h = 0;
+  for (var i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 360;
+  return 'hsl(' + h + ', 45%, 42%)';
+}
+// Кружок: инициалы как фон + фото поверх (если есть и загрузилось).
+function avatarHTML(o) {
+  var ini = initialsFrom(o.name || o.username);
+  var img = o.photo_url ? '<img src="' + esc(o.photo_url) + '" alt="" onerror="this.style.display=\'none\'" />' : '';
+  return '<span class="avatar" style="background:' + avatarColor(o.username || o.name || o.tg_id) + '">' +
+    '<span class="ini">' + esc(ini) + '</span>' + img + '</span>';
+}
+
+function renderAccess(requests, employees) {
+  lastAccReq = requests; lastAccEmp = employees;
+  var html = '<div class="section-title">Запросы на доступ (' + requests.length + ')</div>';
+  if (!requests.length) {
+    html += '<div class="empty" style="padding:18px">Новых запросов нет</div>';
+  } else {
+    html += '<div class="cards">' + requests.map(function (r) {
+      return '<div class="acc-card">' +
+        avatarHTML(r) +
+        '<div class="acc-main"><div class="acc-name">' + esc(r.name || acctId(r)) + '</div>' +
+          '<div class="acc-sub">' + esc(acctId(r)) + ' · ' + dateShort(r.date) + '</div></div>' +
+        '<div class="acc-actions">' +
+          '<button class="btn btn-take" data-id="' + esc(r.tg_id) + '" onclick="approveAcc(this.dataset.id)">Одобрить</button>' +
+          '<button class="btn btn-reject" data-id="' + esc(r.tg_id) + '" onclick="rejectAcc(this.dataset.id)">Отклонить</button>' +
+        '</div></div>';
+    }).join('') + '</div>';
+  }
+  html += '<div class="section-title" style="margin-top:18px;display:flex;align-items:center;justify-content:space-between;gap:8px">' +
+    '<span>Сотрудники с доступом (' + employees.length + ')</span>' +
+    '<button class="link-btn" onclick="refreshContacts()">обновить ники</button></div>';
+  if (!employees.length) {
+    html += '<div class="empty" style="padding:18px">Пока нет сотрудников</div>';
+  } else {
+    html += '<div class="cards">' + employees.map(function (emp) {
+      if (emp.tg_id === renamingId) {
+        // Режим правки имени
+        return '<div class="acc-card">' + avatarHTML(emp) +
+          '<div class="acc-rename"><input class="control" id="renameInput" type="text" value="' + esc(emp.name) + '" maxlength="80" /></div>' +
+          '<div class="acc-actions">' +
+            '<button class="btn btn-take" data-id="' + esc(emp.tg_id) + '" onclick="doRename(this.dataset.id)">Сохранить</button>' +
+            '<button class="btn btn-pause" onclick="cancelRename()">Отмена</button>' +
+          '</div></div>';
+      }
+      return '<div class="acc-card">' + avatarHTML(emp) +
+        '<div class="acc-main"><div class="acc-name">' + esc(emp.name || acctId(emp)) + '</div>' +
+          '<div class="acc-sub">' + esc(acctId(emp)) + '</div></div>' +
+        '<div class="acc-actions">' +
+          '<button class="btn btn-pause" data-id="' + esc(emp.tg_id) + '" onclick="startRename(this.dataset.id)">Переименовать</button>' +
+          '<button class="btn btn-reject" data-id="' + esc(emp.tg_id) + '" onclick="revokeAcc(this.dataset.id)">Закрыть доступ</button>' +
+        '</div></div>';
+    }).join('') + '</div>';
+  }
+  document.getElementById('accessBody').innerHTML = html;
+  var inp = document.getElementById('renameInput');
+  if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+}
+
+function approveAcc(tgId) {
+  api('approveAccess', { target_tg_id: tgId }).then(function () {
+    toast('Доступ одобрен'); refreshAccess();
+  }).catch(function (e) { toast(e.message, true); });
+}
+
+function rejectAcc(tgId) {
+  api('rejectAccess', { target_tg_id: tgId }).then(function () {
+    toast('Запрос отклонён'); refreshAccess();
+  }).catch(function (e) { toast(e.message, true); });
+}
+
+// Разовый бэкфилл ников через Telegram getChat (для уже добавленных сотрудников).
+function refreshContacts() {
+  toast('Обновляю ники…');
+  api('refreshContacts', {}).then(function (d) {
+    toast('Ники обновлены: ' + (d.updated || 0) + (d.failed ? ' · не удалось: ' + d.failed : ''));
+    refreshAccess();
+  }).catch(function (e) { toast(e.message, true); });
+}
+
+function revokeAcc(tgId) {
+  api('revokeAccess', { target_tg_id: tgId }).then(function () {
+    toast('Доступ закрыт'); refreshAccess();
+  }).catch(function (e) { toast(e.message, true); });
+}
+
+// Правка имени: на время редактирования останавливаем опрос, чтобы не стирать ввод.
+function startRename(tgId) {
+  renamingId = tgId;
+  stopPolling();
+  renderAccess(lastAccReq, lastAccEmp);
+}
+function cancelRename() {
+  renamingId = '';
+  renderAccess(lastAccReq, lastAccEmp);
+  startPolling(refreshAccess);
+}
+function doRename(tgId) {
+  var inp = document.getElementById('renameInput');
+  var name = inp ? inp.value.trim() : '';
+  if (!name) { toast('Введите имя', true); if (inp) inp.focus(); return; }
+  api('renameRole', { target_tg_id: tgId, target_name: name }).then(function () {
+    renamingId = '';
+    toast('Имя обновлено');
+    refreshAccess();
+    startPolling(refreshAccess);
+  }).catch(function (e) { toast(e.message, true); });
+}
+
+function listError(id, e) {
+  document.getElementById(id).innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+}
+
+function renderList(containerId, tickets, isAdmin) {
+  cacheFetchedAt = performance.now();
+  tickets.forEach(function (t) { ticketCache[t.number] = t; });
+  viewTickets = tickets;
+  viewContainerId = containerId;
+  paintList(containerId, tickets);
+  // Перерисовываем открытую карточку только если её состояние реально изменилось,
+  // иначе опрос каждые 4с стирал бы открытую панель передачи/прикрепления.
+  if (openTicketNo && ticketCache[openTicketNo]) {
+    var ot = ticketCache[openTicketNo];
+    if (openTicketNo !== lastDetailNo || detailSig(ot) !== lastDetailSig) renderDetail(ot);
+  }
+}
+
+// Сигнатура значимого состояния заявки (без elapsedSeconds — таймер тикает отдельно).
+function detailSig(t) {
+  return [t.status, t.adminId, t.adminName, t.fileUrl, t.reason, t.idleSeconds, t.resolvedAt].join('|');
+}
+
+// Чистая отрисовка списка из массива (без сети) — для оптимистичных обновлений.
+function paintList(containerId, tickets) {
+  var c = document.getElementById(containerId);
+  if (!c) return;
+  if (!tickets.length) {
+    var msg = containerId === 'historyList' ? 'Пока нет решённых заявок'
+            : containerId === 'adminList'  ? 'Активных заявок нет'
+            : 'У вас пока нет заявок';
+    c.innerHTML = '<div class="empty"><span class="icon">📭</span>' + msg + '</div>';
+    return;
+  }
+  c.innerHTML = tickets.map(function (t) { return cardHTML(t); }).join('');
+  var cards = c.querySelectorAll('.card');
+  for (var i = 0; i < cards.length; i++) {
+    (function (card) { card.onclick = function () { openDetail(card.dataset.no); }; })(cards[i]);
+  }
+}
+
+function cardHTML(t) {
+  var cls = STATUS_CLASS[t.status] || '';
+  var timer = '';
+  if (t.status === 'в работе' || t.status === 'на паузе') {
+    timer = '<div class="card-timer" data-timer="' + t.number + '">' + fmt(liveElapsed(t)) + '</div>';
+  } else if (STATUS_HAS_TIME[t.status] && t.elapsedSeconds) {
+    timer = '<div class="card-timer">⏱ ' + fmt(t.elapsedSeconds) + '</div>';
+  }
+  return '' +
+    '<div class="card ' + cls + '" data-no="' + esc(t.number) + '">' +
+      '<div class="card-top">' +
+        '<span class="ticket-no">' + esc(t.number) + '</span>' +
+        '<span class="badge ' + cls + '">' + (STATUS_LABEL[t.status] || t.status) + '</span>' +
+      '</div>' +
+      '<div class="card-meta">' +
+        '<span>' + esc(t.type) + '</span>' +
+        '<span>' + esc(t.city) + ' · ' + esc(t.office) + '</span>' +
+        '<span>' + dateShort(t.createdAt) + '</span>' +
+        (t.fileUrl ? '<span>📎</span>' : '') +
+      '</div>' +
+      '<div class="card-desc">' + esc(t.description) + '</div>' +
+      timer +
+    '</div>';
+}
+
+// ============================ DETAIL ============================
+function openDetail(no) {
+  openTicketNo = no;
+  var t = ticketCache[no];
+  if (!t) return;
+  renderDetail(t);
+  document.getElementById('overlay').classList.add('open');
+}
+
+function closeDetail() {
+  openTicketNo = null;
+  document.getElementById('overlay').classList.remove('open');
+}
+
+function renderDetail(t) {
+  var isAdmin = ROLE === 'админ';
+  var isCreator = String(t.creatorId) === TG_ID;
+  var cls = STATUS_CLASS[t.status] || '';
+
+  // Сотрудник дорабатывает возвращённую заявку — особый режим с формой правки.
+  if (!isAdmin && isCreator && t.status === 'на доработке') {
+    renderRevisionView(t, cls);
+    return;
+  }
+
+  var running = t.status === 'в работе';
+  var terminal = t.status === 'решена' || t.status === 'отклонена';
+  var timerCls = running ? 'running' : (terminal ? 'done' : '');
+
+  var no = esc(t.number); // данные кладём в data-no, в onclick — только статичные литералы
+  var actions = '';
+  var secondary = '';
+  if (isAdmin) {
+    if (t.status === 'создана' || t.status === 'исправлена') {
+      actions = '<button class="btn btn-take" data-no="' + no + '" onclick="act(\'takeTicket\', this.dataset.no)">Взять в работу</button>';
+      secondary = '<button class="btn btn-reject" data-no="' + no + '" onclick="openReason(this.dataset.no, \'reject\')">Отклонить</button>';
+    } else if (t.status === 'в работе' || t.status === 'на паузе') {
+      actions = (t.status === 'в работе'
+          ? '<button class="btn btn-pause" data-no="' + no + '" onclick="act(\'pauseTicket\', this.dataset.no)">Пауза</button>'
+          : '<button class="btn btn-resume" data-no="' + no + '" onclick="act(\'resumeTicket\', this.dataset.no)">Продолжить</button>') +
+        '<button class="btn btn-finish" data-no="' + no + '" onclick="act(\'finishTicket\', this.dataset.no)">Завершить</button>';
+      secondary =
+        '<button class="btn btn-pause" data-no="' + no + '" onclick="openTransfer(this.dataset.no)">Передать</button>' +
+        '<button class="btn btn-revision" data-no="' + no + '" onclick="openReason(this.dataset.no, \'revision\')">На доработку</button>' +
+        '<button class="btn btn-pause" onclick="document.getElementById(\'detail-image\').click()">' +
+          (t.fileUrl ? 'Заменить файл' : 'Прикрепить файл') + '</button>' +
+        '<button class="btn btn-reject" data-no="' + no + '" onclick="openReason(this.dataset.no, \'reject\')">Отклонить</button>';
+    }
+    // На доработке (ждёт сотрудника) и терминальные — действий у админа нет.
+  }
+
+  var showTimer = !!STATUS_HAS_TIME[t.status];
+  var timerLabel = terminal ? 'Затраченное время' : 'Время в работе';
+
+  document.getElementById('detailBody').innerHTML = '' +
+    '<div class="detail-head">' +
+      '<span class="ticket-no">' + esc(t.number) + '</span>' +
+      '<span class="badge ' + cls + '">' + (STATUS_LABEL[t.status] || t.status) + '</span>' +
+    '</div>' +
+    row('Создана', dateFull(t.createdAt)) +
+    row('Тип', esc(t.type)) +
+    row('Город / офис', esc(t.city) + ' · ' + esc(t.office)) +
+    row('Отправитель', esc(t.senderName)) +
+    (t.adminName ? row('Исполнитель', esc(t.adminName)) : '') +
+    (t.idleSeconds ? row('Не в работе', fmtMin(t.idleSeconds)) : '') +
+    (terminal && t.resolvedAt ? row(t.status === 'отклонена' ? 'Отклонена' : 'Решена', dateFull(t.resolvedAt)) : '') +
+    reasonHTML(t) +
+    '<div class="detail-desc">' + esc(t.description) + '</div>' +
+    fileHTML(t) +
+    (showTimer ?
+      '<div class="timer-box ' + timerCls + '">' +
+        '<div class="t" data-detail-timer="' + t.number + '">' + fmt(liveElapsed(t)) + '</div>' +
+        '<div class="l">' + timerLabel + '</div>' +
+      '</div>' : '') +
+    (actions ? '<div class="actions">' + actions + '</div>' : '') +
+    (secondary ? '<div class="actions secondary">' + secondary + '</div>' : '') +
+    '<input type="file" id="detail-image" data-no="' + no + '" style="display:none" onchange="onDetailImage(this.dataset.no)" />' +
+    '<div id="actionPanel"></div>';
+
+  lastDetailNo = t.number;
+  lastDetailSig = detailSig(t);
+}
+
+// Блок основания доработки/отклонения (если есть).
+function reasonHTML(t) {
+  if (!t.reason) return '';
+  if (t.status === 'отклонена') {
+    return '<div class="reason-box reject"><div class="l">Причина отклонения</div><div class="v">' + esc(t.reason) + '</div></div>';
+  }
+  if (t.status === 'на доработке' || t.status === 'исправлена') {
+    return '<div class="reason-box"><div class="l">Причина доработки</div><div class="v">' + esc(t.reason) + '</div></div>';
+  }
+  return '';
+}
+
+// Вложение: миниатюра (тап → лайтбокс внутри приложения) + ссылка-запасной вариант.
+function fileHTML(t) {
+  if (!t.fileUrl) return '';
+  // Рендерим только http(s)-ссылки — защита от javascript:/data: при ручной правке таблицы.
+  if (!/^https?:\/\//i.test(t.fileUrl)) return '';
+  var id = driveId(t.fileUrl);
+  var thumb = id ? 'https://drive.google.com/thumbnail?id=' + id + '&sz=w1000' : t.fileUrl;
+  var full  = id ? 'https://drive.google.com/thumbnail?id=' + id + '&sz=w2000' : t.fileUrl;
+  return '<div class="shot-wrap">' +
+    '<img class="shot clickable" src="' + esc(thumb) + '" alt="вложение" ' +
+      'data-full="' + esc(full) + '" onclick="openLightbox(this.dataset.full)" ' +
+      'onerror="this.style.display=\'none\'" />' +
+    '<a class="file-chip" href="' + esc(t.fileUrl) + '" target="_blank" rel="noopener">' +
+      '<span class="ico">📎</span><span class="nm">Открыть файл</span></a>' +
+    '</div>';
+}
+
+function row(k, v) { return '<div class="detail-row"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'; }
+
+function act(action, number) {
+  var prev = ticketCache[number];
+  if (!prev) return;
+  var snapshot = JSON.parse(JSON.stringify(prev));
+
+  // 1) Оптимистичное обновление — мгновенно меняем состояние локально.
+  var t = optimistic(prev, action);
+  ticketCache[number] = t;
+  cacheFetchedAt = performance.now();
+  patchViewList(number, t, action);
+  if (openTicketNo === number) renderDetail(t);
+
+  // 2) Запрос на сервер; ответ — источник истины.
+  api(action, { number: number, name: USER_NAME }).then(function (d) {
+    ticketCache[d.ticket.number] = d.ticket;
+    cacheFetchedAt = performance.now();
+    if (openTicketNo === number) renderDetail(d.ticket);
+    if (action === 'finishTicket') { toast('Заявка ' + number + ' решена'); setTimeout(closeDetail, 500); }
+    refreshCurrent();
+  }).catch(function (e) {
+    // 3) Откат: возвращаем прежнее состояние.
+    ticketCache[number] = snapshot;
+    cacheFetchedAt = performance.now();
+    if (openTicketNo === number) renderDetail(snapshot);
+    toast('Не удалось: ' + e.message, true);
+    refreshCurrent();
+  });
+}
+
+function optimistic(prev, action) {
+  var t = JSON.parse(JSON.stringify(prev));
+  if (action === 'takeTicket') {
+    t.status = 'в работе'; t.isRunning = true;
+    t.adminName = USER_NAME || t.adminName; t.adminId = TG_ID;
+  } else if (action === 'pauseTicket') {
+    t.elapsedSeconds = liveElapsed(prev); t.status = 'на паузе'; t.isRunning = false;
+  } else if (action === 'resumeTicket') {
+    t.status = 'в работе'; t.isRunning = true;
+  } else if (action === 'finishTicket') {
+    t.elapsedSeconds = liveElapsed(prev); t.status = 'решена'; t.isRunning = false;
+    t.resolvedAt = new Date().toISOString();
+  }
+  return t;
+}
+
+// Мгновенно отражаем изменение в текущем списке.
+function patchViewList(number, t, action) {
+  var idx = -1;
+  for (var i = 0; i < viewTickets.length; i++) { if (viewTickets[i].number === number) { idx = i; break; } }
+  if (idx < 0) return;
+  if (action === 'finishTicket' && viewContainerId === 'adminList') {
+    viewTickets.splice(idx, 1);   // решённая уходит из активных
+  } else {
+    viewTickets[idx] = t;
+  }
+  paintList(viewContainerId, viewTickets);
+}
+
+function refreshCurrent() {
+  if (currentView === 'admin') refreshAdmin();
+  else if (currentView === 'history') refreshHistory();
+  else if (currentView === 'mine') refreshMine();
+}
+
+// ============================ TRANSFER ============================
+function openTransfer(number) {
+  var panel = document.getElementById('actionPanel');
+  if (!panel) return;
+  panel.innerHTML = '<div class="loader">Загрузка списка…</div>';
+  api('getAdmins', {}).then(function (d) {
+    var opts = (d.admins || [])
+      .filter(function (a) { return a.tg_id !== TG_ID; })
+      .map(function (a) { return '<option value="' + esc(a.tg_id) + '">' + esc(a.name) + '</option>'; })
+      .join('');
+    if (!opts) { panel.innerHTML = '<div class="empty">Нет других администраторов</div>'; return; }
+    panel.innerHTML =
+      '<div class="field" style="margin-top:14px"><label>Передать администратору</label>' +
+        '<select class="control" id="transferTo">' + opts + '</select></div>' +
+      '<div class="actions">' +
+        '<button class="btn btn-pause" onclick="closeActionPanel()">Отмена</button>' +
+        '<button class="btn btn-take" data-no="' + esc(number) + '" onclick="doTransfer(this.dataset.no)">Передать</button>' +
+      '</div>';
+  }).catch(function (e) { panel.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; });
+}
+
+function closeActionPanel() { var p = document.getElementById('actionPanel'); if (p) p.innerHTML = ''; }
+
+// ============================ ОСНОВАНИЕ (доработка / отклонение) ============================
+// mode: 'revision' — отправить на доработку, 'reject' — отклонить заявку.
+function openReason(number, mode) {
+  var panel = document.getElementById('actionPanel');
+  if (!panel) return;
+  var isReject = mode === 'reject';
+  var title = isReject ? 'Основание отклонения' : 'Основание доработки';
+  var confirmLabel = isReject ? 'Отклонить заявку' : 'Отправить на доработку';
+  var confirmCls = isReject ? 'btn-reject' : 'btn-revision';
+  panel.innerHTML =
+    '<div class="field" style="margin-top:14px"><label>' + title + '</label>' +
+      '<textarea class="control" id="reasonText" placeholder="Опишите, что не так с заявкой"></textarea></div>' +
+    '<div class="actions">' +
+      '<button class="btn btn-pause" onclick="closeActionPanel()">Отмена</button>' +
+      '<button class="btn ' + confirmCls + '" data-no="' + esc(number) + '" data-mode="' + esc(mode) + '" onclick="confirmReason(this.dataset.no, this.dataset.mode)">' + confirmLabel + '</button>' +
+    '</div>';
+  var ta = document.getElementById('reasonText');
+  if (ta) ta.focus();
+}
+
+function confirmReason(number, mode) {
+  var ta = document.getElementById('reasonText');
+  var reason = ta ? ta.value.trim() : '';
+  if (!reason) { toast('Укажите основание', true); if (ta) ta.focus(); return; }
+  var action = mode === 'reject' ? 'rejectTicket' : 'returnTicket';
+  closeActionPanel();
+  api(action, { number: number, reason: reason, name: USER_NAME }).then(function (d) {
+    ticketCache[d.ticket.number] = d.ticket;
+    cacheFetchedAt = performance.now();
+    if (openTicketNo === number) renderDetail(d.ticket);
+    toast(mode === 'reject' ? 'Заявка ' + number + ' отклонена' : 'Заявка ' + number + ' отправлена на доработку');
+    if (mode === 'reject') setTimeout(closeDetail, 500);
+    refreshCurrent();
+  }).catch(function (e) { toast(e.message, true); });
+}
+
+function doTransfer(number) {
+  var sel = document.getElementById('transferTo');
+  if (!sel) return;
+  var toId = sel.value;
+  closeActionPanel();
+  api('transferTicket', { number: number, to_tg_id: toId, name: USER_NAME }).then(function (d) {
+    ticketCache[d.ticket.number] = d.ticket;
+    cacheFetchedAt = performance.now();
+    if (openTicketNo === number) renderDetail(d.ticket);
+    toast('Заявка ' + number + ' передана');
+    refreshCurrent();
+  }).catch(function (e) { toast(e.message, true); });
+}
+
+// ============================ ДОРАБОТКА (сотрудник) ============================
+function renderRevisionView(t, cls) {
+  document.getElementById('detailBody').innerHTML = '' +
+    '<div class="detail-head">' +
+      '<span class="ticket-no">' + esc(t.number) + '</span>' +
+      '<span class="badge ' + cls + '">' + (STATUS_LABEL[t.status] || t.status) + '</span>' +
+    '</div>' +
+    reasonHTML(t) +
+    '<div class="section-title" style="margin:8px 2px 12px">Исправьте данные и отправьте снова</div>' +
+    '<div class="field"><label>Тип заявки</label>' +
+      '<select class="control" id="rev-type">' + typeOptionsHTML(t.type) + '</select></div>' +
+    '<div class="field"><label>Город</label>' +
+      '<select class="control" id="rev-city" onchange="onRevisionCity()">' + cityOptionsHTML(t.city) + '</select></div>' +
+    '<div class="field"><label>Офис</label>' +
+      '<select class="control" id="rev-office">' + officeOptionsHTML(t.city, t.office) + '</select></div>' +
+    '<div class="field"><label>Имя отправителя</label>' +
+      '<input class="control" id="rev-name" type="text" value="' + esc(t.senderName) + '" /></div>' +
+    '<div class="field"><label>Описание проблемы</label>' +
+      '<textarea class="control" id="rev-desc">' + esc(t.description) + '</textarea></div>' +
+    '<div class="field"><label>Файл (необязательно)</label>' +
+      '<label class="filebtn" id="revFileLabel" for="rev-image">📎 ' + (t.fileUrl ? 'Заменить файл' : 'Прикрепить файл') + '</label>' +
+      '<input type="file" id="rev-image" hidden onchange="onRevisionFile()" />' +
+      '<div id="revImgPreview"></div></div>' +
+    (t.fileUrl ? '<div style="margin:-6px 2px 12px;font-size:12px;color:var(--muted)">Уже прикреплён файл — ' +
+        '<a href="' + esc(t.fileUrl) + '" target="_blank" rel="noopener" style="color:var(--accent)">открыть</a>. Новый заменит его.</div>' : '') +
+    '<div class="actions">' +
+      '<button class="btn btn-take" id="resubmitBtn" data-no="' + esc(t.number) + '" onclick="doResubmit(this.dataset.no)">Отправить снова</button>' +
+    '</div>';
+  revFile = ''; revFileName = '';
+  lastDetailNo = t.number;
+  lastDetailSig = detailSig(t);
+}
+
+function typeOptionsHTML(selected) {
+  return allTypes().map(function (tp) {
+    return '<option' + (tp === selected ? ' selected' : '') + '>' + esc(tp) + '</option>';
+  }).join('');
+}
+function cityOptionsHTML(selected) {
+  return allCities().map(function (c) {
+    return '<option' + (c === selected ? ' selected' : '') + '>' + esc(c) + '</option>';
+  }).join('');
+}
+function officeOptionsHTML(city, selected) {
+  var list = getOfficesForCity(city);
+  return list.map(function (of) {
+    return '<option' + (of === selected ? ' selected' : '') + '>' + esc(of) + '</option>';
+  }).join('');
+}
+
+function onRevisionCity() {
+  var c = document.getElementById('rev-city');
+  var o = document.getElementById('rev-office');
+  if (c && o) o.innerHTML = officeOptionsHTML(c.value, '');
+}
+
+function onRevisionFile() {
+  var inp = document.getElementById('rev-image');
+  var f = inp && inp.files && inp.files[0];
+  var label = document.getElementById('revFileLabel');
+  var prev = document.getElementById('revImgPreview');
+  if (!f) { revFile = ''; revFileName = ''; if (prev) prev.innerHTML = ''; return; }
+  if (f.size > MAX_FILE_BYTES) { toast('Файл больше 20 МБ', true); inp.value = ''; return; }
+  readAttachment(f).then(function (res) {
+    revFile = res.dataUrl; revFileName = res.name;
+    if (label) label.textContent = '📎 Файл выбран';
+    if (prev) prev.innerHTML = attachPreviewHTML(res, f.type);
+  }).catch(function (e) { toast(e && e.message ? e.message : 'Не удалось обработать файл', true); inp.value = ''; });
+}
+
+function doResubmit(number) {
+  var type = revVal('rev-type'), city = revVal('rev-city'), office = revVal('rev-office'),
+      name = revVal('rev-name'), desc = revVal('rev-desc');
+  if (!type || !city || !office || !name || !desc) { toast('Заполните все поля', true); return; }
+  var btn = document.getElementById('resubmitBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Отправка…'; }
+  api('resubmitTicket', {
+    number: number, type: type, city: city, office: office, name: name, description: desc,
+    image: revFile || undefined, filename: revFileName || undefined
+  }).then(function (d) {
+    ticketCache[d.ticket.number] = d.ticket;
+    cacheFetchedAt = performance.now();
+    toast('Заявка ' + number + ' отправлена в работу');
+    closeDetail();
+    refreshCurrent();
+  }).catch(function (e) {
+    toast(e.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = 'Отправить снова'; }
+  });
+}
+function revVal(id) { var el = document.getElementById(id); return el ? el.value.trim() : ''; }
+
+// Прикрепление файла админом в открытой заявке.
+function onDetailImage(number) {
+  var inp = document.getElementById('detail-image');
+  var f = inp && inp.files && inp.files[0];
+  if (!f) return;
+  if (f.size > MAX_FILE_BYTES) { toast('Файл больше 20 МБ', true); inp.value = ''; return; }
+  toast('Загрузка файла…');
+  readAttachment(f).then(function (res) {
+    return api('addScreenshot', { number: number, image: res.dataUrl, filename: res.name });
+  }).then(function (d) {
+    ticketCache[d.ticket.number] = d.ticket;
+    cacheFetchedAt = performance.now();
+    if (openTicketNo === number) renderDetail(d.ticket);
+    toast('Файл прикреплён');
+    refreshCurrent();
+  }).catch(function (e) { toast(e.message, true); });
+}
+
+function fmtMin(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  function p(n) { return ('0' + n).slice(-2); }
+  return p(Math.floor(sec / 60)) + ':' + p(sec % 60);
+}
+
+function driveId(url) {
+  var s = String(url);
+  var m = s.match(/\/d\/([-\w]{20,})/) || s.match(/[?&]id=([-\w]{20,})/);
+  return m ? m[1] : '';
+}
+
+// ============================ LIVE TIMER ============================
+// Для бегущих заявок прибавляем секунды, прошедшие с момента запроса.
+function liveElapsed(t) {
+  if (t.status !== 'в работе' || !t.isRunning) return t.elapsedSeconds;
+  var since = Math.floor((performance.now() - cacheFetchedAt) / 1000);
+  return t.elapsedSeconds + Math.max(0, since);
+}
+
+function tickTimers() {
+  var els = document.querySelectorAll('[data-timer]');
+  els.forEach(function (el) {
+    var t = ticketCache[el.getAttribute('data-timer')];
+    if (t) el.textContent = fmt(liveElapsed(t));
+  });
+  var d = document.querySelector('[data-detail-timer]');
+  if (d) {
+    var dt = ticketCache[d.getAttribute('data-detail-timer')];
+    if (dt) d.textContent = fmt(liveElapsed(dt));
+  }
+}
+
+// ============================ UTILS ============================
+function fmt(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  function p(n) { return ('0' + n).slice(-2); }
+  return p(h) + ':' + p(m) + ':' + p(s);
+}
+function dateFull(iso) {
+  if (!iso) return '—';
+  var d = new Date(iso);
+  return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function dateShort(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function toast(msg, isErr) {
+  var el = document.getElementById('toast');
+  el.textContent = msg; el.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(el._t); el._t = setTimeout(function () { el.className = 'toast'; }, 2800);
+}
+
+// ============================ LIGHTBOX ============================
+function openLightbox(url) {
+  var img = document.getElementById('lightboxImg');
+  img.src = url;
+  document.getElementById('lightbox').classList.add('open');
+}
+function closeLightbox() {
+  document.getElementById('lightbox').classList.remove('open');
+  document.getElementById('lightboxImg').src = '';
+}
+
+// ============================ INIT ============================
+document.getElementById('overlay').addEventListener('click', function (e) {
+  if (e.target === this) closeDetail();
+});
+tickTimer = setInterval(tickTimers, 1000);
+boot();
+</script>
+</body>
+</html>
