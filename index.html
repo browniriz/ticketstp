@@ -246,6 +246,9 @@
   .reason-box.reject { background: color-mix(in srgb, var(--red) 9%, var(--surface));
     border-color: color-mix(in srgb, var(--red) 32%, transparent); }
   .reason-box.reject .l { color: var(--red); }
+  .reason-box.done { background: color-mix(in srgb, var(--green) 9%, var(--surface));
+    border-color: color-mix(in srgb, var(--green) 32%, transparent); }
+  .reason-box.done .l { color: var(--green); }
 
   /* ---------- States ---------- */
   .empty { text-align: center; color: var(--muted); padding: 48px 20px; font-size: 14px; }
@@ -1066,7 +1069,7 @@ function renderDetail(t) {
       actions = (t.status === 'в работе'
           ? '<button class="btn btn-pause" data-no="' + no + '" onclick="act(\'pauseTicket\', this.dataset.no)">Пауза</button>'
           : '<button class="btn btn-resume" data-no="' + no + '" onclick="act(\'resumeTicket\', this.dataset.no)">Продолжить</button>') +
-        '<button class="btn btn-finish" data-no="' + no + '" onclick="act(\'finishTicket\', this.dataset.no)">Завершить</button>';
+        '<button class="btn btn-finish" data-no="' + no + '" onclick="openFinish(this.dataset.no)">Завершить</button>';
       secondary =
         '<button class="btn btn-pause" data-no="' + no + '" onclick="openTransfer(this.dataset.no)">Передать</button>' +
         '<button class="btn btn-revision" data-no="' + no + '" onclick="openReason(this.dataset.no, \'revision\')">На доработку</button>' +
@@ -1109,7 +1112,7 @@ function renderDetail(t) {
   lastDetailSig = detailSig(t);
 }
 
-// Блок основания доработки/отклонения (если есть).
+// Блок основания доработки/отклонения/комментария (если есть).
 function reasonHTML(t) {
   if (!t.reason) return '';
   if (t.status === 'отклонена') {
@@ -1117,6 +1120,9 @@ function reasonHTML(t) {
   }
   if (t.status === 'на доработке' || t.status === 'исправлена') {
     return '<div class="reason-box"><div class="l">Причина доработки</div><div class="v">' + esc(t.reason) + '</div></div>';
+  }
+  if (t.status === 'решена') {
+    return '<div class="reason-box done"><div class="l">Комментарий</div><div class="v">' + esc(t.reason) + '</div></div>';
   }
   return '';
 }
@@ -1259,6 +1265,33 @@ function confirmReason(number, mode) {
     if (openTicketNo === number) renderDetail(d.ticket);
     toast(mode === 'reject' ? 'Заявка ' + number + ' отклонена' : 'Заявка ' + number + ' отправлена на доработку');
     if (mode === 'reject') setTimeout(closeDetail, 500);
+    refreshCurrent();
+  }).catch(function (e) { toast(e.message, true); });
+}
+
+// ============================ ЗАВЕРШЕНИЕ С КОММЕНТАРИЕМ ============================
+function openFinish(number) {
+  var panel = document.getElementById('actionPanel');
+  if (!panel) return;
+  panel.innerHTML =
+    '<div class="field" style="margin-top:14px"><label>Комментарий (необязательно)</label>' +
+      '<textarea class="control" id="finishComment" placeholder="Напишите комментарий для сотрудника"></textarea></div>' +
+    '<div class="actions">' +
+      '<button class="btn btn-pause" onclick="closeActionPanel()">Отмена</button>' +
+      '<button class="btn btn-finish" data-no="' + esc(number) + '" onclick="confirmFinish(this.dataset.no)">Завершить заявку</button>' +
+    '</div>';
+}
+
+function confirmFinish(number) {
+  var ta = document.getElementById('finishComment');
+  var comment = ta ? ta.value.trim() : '';
+  closeActionPanel();
+  api('finishTicket', { number: number, comment: comment, name: USER_NAME }).then(function (d) {
+    ticketCache[d.ticket.number] = d.ticket;
+    cacheFetchedAt = performance.now();
+    if (openTicketNo === number) renderDetail(d.ticket);
+    toast('Заявка ' + number + ' решена');
+    setTimeout(closeDetail, 500);
     refreshCurrent();
   }).catch(function (e) { toast(e.message, true); });
 }
