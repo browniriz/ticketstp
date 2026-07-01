@@ -117,6 +117,10 @@ var CACHE_TTL_SECONDS = 20;
 var CACHE_KEY_TICKETS_ACTIVE = 'ticket_rows_active_v2';
 var CACHE_KEY_TICKETS_DONE = 'ticket_rows_done_v2';
 var CACHE_KEY_ROLES = 'role_rows_v1';
+// Лидерборд хранит уже посчитанные агрегаты (не сырые строки), поэтому не
+// упирается в лимит CacheService даже при большой истории заявок.
+var CACHE_KEY_LEADERBOARD_ALL = 'leaderboard_all_v1';
+var CACHE_KEY_LEADERBOARD_MONTH = 'leaderboard_month_v1';
 
 // ============================ ROUTING ============================
 
@@ -157,6 +161,7 @@ function doPost(e) {
       case 'transferTicket': data = transferTicket_(body); break;
       case 'addScreenshot': data = addScreenshot_(body); break;
       case 'getAdmins':     data = getAdmins_(body); break;
+      case 'getLeaderboard': data = getLeaderboard_(body); break;
       case 'requestAccess': data = requestAccess_(body); break;
       case 'getAccess':     data = getAccess_(body); break;
       case 'approveAccess': data = approveAccess_(body); break;
@@ -793,6 +798,87 @@ function getAdmins_(body) {
   return { admins: admins };
 }
 
+// ============================ LEADERBOARD (рейтинг админов) ============================
+// Место = сумма очков за 2 ранга: по количеству закрытых заявок и по средней
+// скорости обработки (меньше среднее время — лучше). За 1/2/3 место в каждом
+// ранге начисляется 3/2/1 очко — устойчивее к перекосам, чем один общий балл
+// из разных по природе метрик (штуки vs минуты).
+function getLeaderboard_(body) {
+  requireAdmin_(body);
+  var period = (body.period === 'month') ? 'month' : 'all';
+  var cacheKey = period === 'month' ? CACHE_KEY_LEADERBOARD_MONTH : CACHE_KEY_LEADERBOARD_ALL;
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get(cacheKey);
+  if (cached) { try { return JSON.parse(cached); } catch (e) {} }
+
+  // История = терминальные статусы (решена/отклонена), как и getHistory_.
+  var done = readDoneTicketRows_().map(rowToTicket_);
+  if (period === 'month') {
+    var now = new Date();
+    var y = now.getFullYear(), m = now.getMonth();
+    done = done.filter(function (t) {
+      if (!t.resolvedAt) return false;
+      var d = new Date(t.resolvedAt);
+      return d.getFullYear() === y && d.getMonth() === m;
+    });
+  }
+
+  var stats = {}; // tg_id -> агрегаты
+  done.forEach(function (t) {
+    var id = t.adminId;
+    if (!id) return;
+    if (!stats[id]) stats[id] = { tg_id: id, name: t.adminName || id, count: 0, totalSec: 0, byType: {}, byCity: {} };
+    var s = stats[id];
+    s.count++;
+    s.totalSec += t.elapsedSeconds || 0; // накопленное рабочее время заявки, не календарное
+    if (t.adminName) s.name = t.adminName; // берём самое свежее отображаемое имя
+    if (t.type) s.byType[t.type] = (s.byType[t.type] || 0) + 1;
+    if (t.city) s.byCity[t.city] = (s.byCity[t.city] || 0) + 1;
+  });
+
+  var list = Object.keys(stats).map(function (id) {
+    var s = stats[id];
+    return {
+      tg_id: s.tg_id,
+      name: s.name,
+      count: s.count,
+      avgSeconds: s.count ? Math.round(s.totalSec / s.count) : 0,
+      favoriteType: topKey_(s.byType),
+      favoriteCity: topKey_(s.byCity)
+    };
+  });
+
+  rankPoints_(list, function (a, b) { return b.count - a.count; }, 'countPoints');
+  rankPoints_(list, function (a, b) { return a.avgSeconds - b.avgSeconds; }, 'speedPoints');
+  list.forEach(function (e) { e.score = e.countPoints + e.speedPoints; });
+  list.sort(function (a, b) {
+    if (b.score !== a.score) return b.score - a.score;
+    if (b.count !== a.count) return b.count - a.count;
+    return a.avgSeconds - b.avgSeconds;
+  });
+
+  var result = { period: period, leaders: list };
+  var json = JSON.stringify(result);
+  if (json.length < 95000) cache.put(cacheKey, json, CACHE_TTL_SECONDS);
+  return result;
+}
+
+// Ключ с максимальным значением в объекте-счётчике ({тип/город: count}).
+function topKey_(obj) {
+  var bestKey = '', bestVal = -1;
+  Object.keys(obj).forEach(function (k) {
+    if (obj[k] > bestVal) { bestVal = obj[k]; bestKey = k; }
+  });
+  return bestKey;
+}
+
+// Начисляет очки 3/2/1 за 1/2/3 место по компаратору cmp (сортирует "лучших" в начало).
+function rankPoints_(list, cmp, pointsField) {
+  var sorted = list.slice().sort(cmp);
+  var points = [3, 2, 1];
+  sorted.forEach(function (e, i) { e[pointsField] = i < points.length ? points[i] : 0; });
+}
+
 // ============================ ACCESS (доступ) ============================
 
 // Сотрудник запрашивает доступ.
@@ -1063,6 +1149,8 @@ function invalidateTicketCache_() {
   var cache = CacheService.getScriptCache();
   cache.remove(CACHE_KEY_TICKETS_ACTIVE);
   cache.remove(CACHE_KEY_TICKETS_DONE);
+  cache.remove(CACHE_KEY_LEADERBOARD_ALL);
+  cache.remove(CACHE_KEY_LEADERBOARD_MONTH);
 }
 
 // ============================ ROW INDEX CACHE (заявки) ============================

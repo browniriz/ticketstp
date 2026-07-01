@@ -293,6 +293,52 @@
   /* ---------- Поиск (история/доступы) ---------- */
   .search-input { margin-bottom: 14px; }
 
+  /* ---------- Лидерборд ---------- */
+  .lb-toggle { right: 54px; }
+  .lb-period { display: flex; gap: 6px; margin-bottom: 16px; background: var(--bg-soft); padding: 4px; border-radius: 12px; }
+  .lb-period-btn {
+    flex: 1; text-align: center; padding: 9px 8px; border-radius: 9px;
+    font-size: 13px; font-weight: 600; color: var(--muted);
+    background: transparent; border: none; cursor: pointer;
+    transition: background var(--ease) .25s, color var(--ease) .25s;
+  }
+  .lb-period-btn.active { background: var(--surface-2); color: var(--text); }
+
+  .lb-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px; margin-bottom: 10px;
+    background: var(--surface); border-radius: var(--radius);
+    border: 1px solid var(--line); cursor: pointer;
+    transition: transform .15s var(--ease);
+  }
+  .lb-row:active { transform: scale(.98); }
+  .lb-rank {
+    flex: 0 0 34px; height: 34px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 14px; color: var(--muted); background: var(--surface-2);
+  }
+  .lb-row.lb-gold .lb-rank { background: linear-gradient(145deg, #ffe08a, #d4a017); color: #4a3400; }
+  .lb-row.lb-silver .lb-rank { background: linear-gradient(145deg, #eef1f5, #b9c0cc); color: #3a3f47; }
+  .lb-row.lb-bronze .lb-rank { background: linear-gradient(145deg, #e3b088, #a9683f); color: #3a2210; }
+  .lb-main { flex: 1; min-width: 0; }
+  .lb-name { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 6px; }
+  .lb-meta { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .lb-cup {
+    display: inline-block; font-size: 18px; line-height: 1;
+    animation: lbShine 1.8s ease-in-out infinite;
+    filter: drop-shadow(0 0 4px rgba(255, 200, 60, .7));
+  }
+  @keyframes lbShine {
+    0%, 100% { transform: rotate(-6deg) scale(1); }
+    50% { transform: rotate(6deg) scale(1.15); }
+  }
+  .lb-detail {
+    display: none; margin-top: 10px; padding-top: 10px;
+    border-top: 1px dashed var(--line); font-size: 13px; color: var(--muted);
+  }
+  .lb-row.lb-open .lb-detail { display: block; }
+  .lb-detail b { color: var(--text); }
+
   /* ---------- Lightbox ---------- */
   .lightbox {
     position: fixed; inset: 0; z-index: 300;
@@ -331,6 +377,7 @@
 
 <div class="topbar">
   <button id="themeToggle" class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Сменить тему">🌙</button>
+  <button id="lbBtn" class="theme-toggle lb-toggle" type="button" onclick="switchView('leaderboard')" aria-label="Рейтинг админов" style="display:none">🏆</button>
   <h1 id="appTitle">Заявки</h1>
   <div class="role-chip" id="roleChip"></div>
   <div class="tabs" id="tabs"></div>
@@ -403,6 +450,16 @@
     oninput="onAccessSearchInput(this.value)" onfocus="stopPolling()" onblur="startPolling(refreshAccess)" />
   <div id="accessBody"><div class="loader">Загрузка…</div></div>
   <div class="pager" id="accessPager"></div>
+</section>
+
+<!-- ===== Admin: leaderboard ===== -->
+<section class="screen" id="screen-leaderboard">
+  <div class="section-title">Рейтинг админов</div>
+  <div class="lb-period" id="lbPeriodSwitch">
+    <button class="lb-period-btn active" data-period="all" onclick="setLbPeriod('all')">Всё время</button>
+    <button class="lb-period-btn" data-period="month" onclick="setLbPeriod('month')">Этот месяц</button>
+  </div>
+  <div id="lbList"><div class="loader">Загрузка…</div></div>
 </section>
 
 <!-- ===== Guest: no access yet ===== -->
@@ -598,6 +655,7 @@ function buildUI(initialTickets) {
     addTab('history', 'История');
     addTab('access', 'Доступы');
     addTab('new', 'Создать');
+    var lbBtn = document.getElementById('lbBtn'); if (lbBtn) lbBtn.style.display = 'flex';
     initForm();
     switchView('admin', initialTickets);
   } else if (ROLE === 'сотрудник') {
@@ -693,6 +751,11 @@ function switchView(view, preloadedTickets) {
     var as = document.getElementById('accessSearch'); if (as) as.value = '';
     refreshAccess();
     startPolling(refreshAccess);
+  }
+  if (view === 'leaderboard') {
+    lbOpenId = '';
+    refreshLeaderboard();
+    startPolling(refreshLeaderboard); // виден в реальном времени, пока экран открыт
   }
 }
 
@@ -1132,6 +1195,61 @@ function cardHTML(t) {
       '<div class="card-desc">' + esc(t.description) + '</div>' +
       timer +
     '</div>';
+}
+
+// ============================ LEADERBOARD (админ) ============================
+var lbPeriod = 'all';   // 'all' | 'month' — сбрасывается только вручную переключателем
+var lbOpenId = '';      // tg_id админа с развёрнутой доп. информацией
+var lastLeaders = [];   // последний полученный список — для локального разворачивания без запроса
+
+function setLbPeriod(period) {
+  if (period === lbPeriod) return;
+  lbPeriod = period;
+  lbOpenId = '';
+  var btns = document.querySelectorAll('.lb-period-btn');
+  for (var i = 0; i < btns.length; i++) btns[i].classList.toggle('active', btns[i].dataset.period === period);
+  refreshLeaderboard();
+}
+
+function refreshLeaderboard() {
+  api('getLeaderboard', { period: lbPeriod }).then(function (d) {
+    lastLeaders = d.leaders || [];
+    renderLeaderboard(lastLeaders);
+  }).catch(function (e) { listError('lbList', e); });
+}
+
+var LB_MEDALS = ['🥇', '🥈', '🥉'];
+
+function renderLeaderboard(leaders) {
+  var el = document.getElementById('lbList');
+  if (!el) return;
+  if (!leaders.length) {
+    el.innerHTML = '<div class="empty"><span class="icon">🏆</span>Пока нет закрытых заявок за этот период.</div>';
+    return;
+  }
+  el.innerHTML = leaders.map(function (a, i) {
+    var rankCls = i === 0 ? 'lb-gold' : i === 1 ? 'lb-silver' : i === 2 ? 'lb-bronze' : '';
+    var openCls = lbOpenId === a.tg_id ? ' lb-open' : '';
+    var cup = i === 0 ? ' <span class="lb-cup">🏆</span>' : '';
+    return (
+      '<div class="lb-row ' + rankCls + openCls + '" onclick="toggleLbRow(\'' + a.tg_id + '\')">' +
+        '<div class="lb-rank">' + (LB_MEDALS[i] || (i + 1)) + '</div>' +
+        '<div class="lb-main">' +
+          '<div class="lb-name">' + esc(a.name) + cup + '</div>' +
+          '<div class="lb-meta">' + a.count + ' заявок · ⏱ ср. ' + fmt(a.avgSeconds) + '</div>' +
+          '<div class="lb-detail">' +
+            'Любимый тип заявки: <b>' + esc(a.favoriteType || '—') + '</b><br>' +
+            'Любимый город: <b>' + esc(a.favoriteCity || '—') + '</b>' +
+          '</div>' +
+        '</div>' +
+      '</div>'
+    );
+  }).join('');
+}
+
+function toggleLbRow(tgId) {
+  lbOpenId = (lbOpenId === tgId) ? '' : tgId;
+  renderLeaderboard(lastLeaders); // локальная перерисовка, без запроса к серверу
 }
 
 // ============================ DETAIL ============================
