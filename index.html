@@ -285,10 +285,13 @@
   .link-btn:active { opacity: .6; }
   .link-btn:disabled { opacity: .3; pointer-events: none; }
 
-  /* ---------- Пагинация истории ---------- */
+  /* ---------- Пагинация истории/доступов ---------- */
   .pager { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 16px; }
   .pager .link-btn { font-size: 13px; }
   .pager-info { font-size: 12px; color: var(--muted); }
+
+  /* ---------- Поиск (история/доступы) ---------- */
+  .search-input { margin-bottom: 14px; }
 
   /* ---------- Lightbox ---------- */
   .lightbox {
@@ -387,13 +390,19 @@
 <!-- ===== Admin: history ===== -->
 <section class="screen" id="screen-history">
   <div class="section-title">История решённых заявок</div>
+  <input class="control search-input" id="historySearch" type="text"
+    placeholder="Поиск: номер, город, офис, описание…" oninput="onHistorySearchInput(this.value)" />
   <div class="cards" id="historyList"><div class="loader">Загрузка…</div></div>
   <div class="pager" id="historyPager"></div>
 </section>
 
 <!-- ===== Admin: access management ===== -->
 <section class="screen" id="screen-access">
+  <input class="control search-input" id="accessSearch" type="text"
+    placeholder="Поиск сотрудника: имя или @ник"
+    oninput="onAccessSearchInput(this.value)" onfocus="stopPolling()" onblur="startPolling(refreshAccess)" />
   <div id="accessBody"><div class="loader">Загрузка…</div></div>
+  <div class="pager" id="accessPager"></div>
 </section>
 
 <!-- ===== Guest: no access yet ===== -->
@@ -674,8 +683,17 @@ function switchView(view, preloadedTickets) {
     else refreshAdmin();
     startPolling(refreshAdmin);
   }
-  if (view === 'history') { historyPage = 1; refreshHistory(); }
-  if (view === 'access')  { refreshAccess(); startPolling(refreshAccess); }
+  if (view === 'history') {
+    historyPage = 1; historyQuery = '';
+    var hs = document.getElementById('historySearch'); if (hs) hs.value = '';
+    refreshHistory();
+  }
+  if (view === 'access')  {
+    accessPage = 1; accessQuery = '';
+    var as = document.getElementById('accessSearch'); if (as) as.value = '';
+    refreshAccess();
+    startPolling(refreshAccess);
+  }
 }
 
 function startPolling(fn) { stopPolling(); pollTimer = setInterval(fn, 4000); }
@@ -846,10 +864,12 @@ function refreshAdmin() {
   api('getTickets', {}).then(function (d) { renderList('adminList', d.tickets, true); })
     .catch(function (e) { listError('adminList', e); });
 }
-var historyPage = 1; // текущая страница истории (сбрасывается при входе на вкладку)
+var historyPage = 1;   // текущая страница истории (сбрасывается при входе на вкладку)
+var historyQuery = ''; // текущий поисковый запрос
+var historySearchDebounce = null;
 
 function refreshHistory() {
-  api('getHistory', { page: historyPage }).then(function (d) {
+  api('getHistory', { page: historyPage, q: historyQuery }).then(function (d) {
     historyPage = d.page || 1;
     renderList('historyList', d.tickets, true);
     renderHistoryPager(d.page, d.totalPages, d.total);
@@ -874,17 +894,58 @@ function goHistoryPage(p) {
   refreshHistory();
 }
 
+// Поиск по истории — с дебаунсом, чтобы не слать запрос на каждый символ.
+function onHistorySearchInput(val) {
+  historyQuery = val;
+  historyPage = 1;
+  clearTimeout(historySearchDebounce);
+  historySearchDebounce = setTimeout(refreshHistory, 300);
+}
+
 // ============================ ACCESS (админ) ============================
 var renamingId = '';        // id сотрудника, которого сейчас переименовывают
 var lastAccReq = [], lastAccEmp = []; // последний показанный список (для перерисовки без сети)
+var accessPage = 1;         // текущая страница списка сотрудников
+var accessQuery = '';       // текущий поисковый запрос
+var accessSearchDebounce = null;
+var lastAccPage = 1, lastAccTotalPages = 1, lastAccTotal = 0; // метаданные последней страницы
 
 function refreshAccess() {
   renamingId = ''; // свежая загрузка/повторный вход — сбрасываем режим правки
-  api('getAccess', {}).then(function (d) {
+  api('getAccess', { page: accessPage, q: accessQuery }).then(function (d) {
+    accessPage = d.page || 1;
+    lastAccPage = d.page || 1;
+    lastAccTotalPages = d.totalPages || 1;
+    lastAccTotal = d.total || 0;
     renderAccess(d.requests || [], d.employees || []);
+    renderAccessPager(lastAccPage, lastAccTotalPages, lastAccTotal);
   }).catch(function (e) {
     document.getElementById('accessBody').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+    var p = document.getElementById('accessPager'); if (p) p.innerHTML = '';
   });
+}
+
+function renderAccessPager(page, totalPages, total) {
+  var el = document.getElementById('accessPager');
+  if (!el) return;
+  if (!total || totalPages <= 1) { el.innerHTML = ''; return; }
+  el.innerHTML =
+    '<button class="link-btn" ' + (page <= 1 ? 'disabled' : '') + ' onclick="goAccessPage(' + (page - 1) + ')">← Назад</button>' +
+    '<span class="pager-info">Стр. ' + page + ' из ' + totalPages + ' (' + total + ' сотрудников)</span>' +
+    '<button class="link-btn" ' + (page >= totalPages ? 'disabled' : '') + ' onclick="goAccessPage(' + (page + 1) + ')">Вперёд →</button>';
+}
+
+function goAccessPage(p) {
+  accessPage = p;
+  refreshAccess();
+}
+
+// Поиск сотрудника — с дебаунсом, чтобы не слать запрос на каждый символ.
+function onAccessSearchInput(val) {
+  accessQuery = val;
+  accessPage = 1;
+  clearTimeout(accessSearchDebounce);
+  accessSearchDebounce = setTimeout(refreshAccess, 300);
 }
 
 // Идентификатор: @ник, иначе id (запасной вариант, если ника нет).
@@ -927,10 +988,11 @@ function renderAccess(requests, employees) {
     }).join('') + '</div>';
   }
   html += '<div class="section-title" style="margin-top:18px;display:flex;align-items:center;justify-content:space-between;gap:8px">' +
-    '<span>Сотрудники с доступом (' + employees.length + ')</span>' +
+    '<span>Сотрудники с доступом (' + lastAccTotal + ')</span>' +
     '<button class="link-btn" onclick="refreshContacts()">обновить ники</button></div>';
   if (!employees.length) {
-    html += '<div class="empty" style="padding:18px">Пока нет сотрудников</div>';
+    html += '<div class="empty" style="padding:18px">' +
+      (accessQuery ? 'Никого не найдено' : 'Пока нет сотрудников') + '</div>';
   } else {
     html += '<div class="cards">' + employees.map(function (emp) {
       if (emp.tg_id === renamingId) {

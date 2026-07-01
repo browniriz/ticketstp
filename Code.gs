@@ -538,6 +538,20 @@ function getHistory_(body) {
   requireAdmin_(body);
   // История = терминальные статусы: решена и отклонена.
   var done = readDoneTicketRows_().map(rowToTicket_);
+
+  var q = String(body.q || '').trim().toLowerCase();
+  if (q) {
+    done = done.filter(function (t) {
+      return String(t.number || '').toLowerCase().indexOf(q) !== -1 ||
+             (t.description || '').toLowerCase().indexOf(q) !== -1 ||
+             (t.senderName || '').toLowerCase().indexOf(q) !== -1 ||
+             (t.type || '').toLowerCase().indexOf(q) !== -1 ||
+             (t.city || '').toLowerCase().indexOf(q) !== -1 ||
+             (t.office || '').toLowerCase().indexOf(q) !== -1 ||
+             (t.adminName || '').toLowerCase().indexOf(q) !== -1;
+    });
+  }
+
   done.sort(function (a, b) {
     return String(b.resolvedAt).localeCompare(String(a.resolvedAt));
   });
@@ -793,18 +807,46 @@ function requestAccess_(body) {
   return { ok: true };
 }
 
-// Для админской вкладки: ожидающие запросы + сотрудники с доступом.
+// Страница списка сотрудников фиксированного размера (не берём из body, как и
+// для истории заявок) + опциональный поиск по имени/нику.
+var ACCESS_PAGE_SIZE = 10;
+
+// Для админской вкладки: ожидающие запросы (без пагинации — их обычно мало и
+// админу нужно видеть все сразу) + сотрудники с доступом (постранично, с
+// опциональным поиском по имени или @нику).
 function getAccess_(body) {
   requireAdmin_(body);
   var roleRows = readRoleRows_();
   var inRoles = {};
   roleRows.forEach(function (r) { inRoles[String(r[0])] = true; });
   var requests = readRequests_().filter(function (r) { return !inRoles[r.tg_id]; });
+
   var employees = roleRows.filter(function (r) { return String(r[2]) === 'сотрудник'; })
     .map(function (r) {
       return { tg_id: String(r[0]), name: r[1] || String(r[0]), username: r[3] || '', photo_url: r[4] || '' };
     });
-  return { requests: requests, employees: employees };
+
+  var q = String(body.q || '').trim().toLowerCase();
+  if (q) {
+    employees = employees.filter(function (e) {
+      return (e.name || '').toLowerCase().indexOf(q) !== -1 ||
+             (e.username || '').toLowerCase().indexOf(q) !== -1;
+    });
+  }
+  employees.sort(function (a, b) { return String(a.name || '').localeCompare(String(b.name || ''), 'ru'); });
+
+  var totalPages = Math.max(1, Math.ceil(employees.length / ACCESS_PAGE_SIZE));
+  var page = Math.floor(Number(body.page)) || 1;
+  page = Math.min(Math.max(1, page), totalPages);
+  var start = (page - 1) * ACCESS_PAGE_SIZE;
+
+  return {
+    requests: requests,
+    employees: employees.slice(start, start + ACCESS_PAGE_SIZE),
+    page: page,
+    totalPages: totalPages,
+    total: employees.length
+  };
 }
 
 // Админ одобряет доступ → сотрудник попадает в «роли» (с контактами из запроса).
