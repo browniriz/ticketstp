@@ -283,6 +283,12 @@
   .link-btn { background: none; border: none; color: var(--accent); font-size: 12px;
     font-weight: 600; cursor: pointer; padding: 2px 4px; font-family: inherit; text-transform: none; letter-spacing: 0; }
   .link-btn:active { opacity: .6; }
+  .link-btn:disabled { opacity: .3; pointer-events: none; }
+
+  /* ---------- Пагинация истории ---------- */
+  .pager { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 16px; }
+  .pager .link-btn { font-size: 13px; }
+  .pager-info { font-size: 12px; color: var(--muted); }
 
   /* ---------- Lightbox ---------- */
   .lightbox {
@@ -382,6 +388,7 @@
 <section class="screen" id="screen-history">
   <div class="section-title">История решённых заявок</div>
   <div class="cards" id="historyList"><div class="loader">Загрузка…</div></div>
+  <div class="pager" id="historyPager"></div>
 </section>
 
 <!-- ===== Admin: access management ===== -->
@@ -667,7 +674,7 @@ function switchView(view, preloadedTickets) {
     else refreshAdmin();
     startPolling(refreshAdmin);
   }
-  if (view === 'history') { refreshHistory(); }
+  if (view === 'history') { historyPage = 1; refreshHistory(); }
   if (view === 'access')  { refreshAccess(); startPolling(refreshAccess); }
 }
 
@@ -839,9 +846,32 @@ function refreshAdmin() {
   api('getTickets', {}).then(function (d) { renderList('adminList', d.tickets, true); })
     .catch(function (e) { listError('adminList', e); });
 }
+var historyPage = 1; // текущая страница истории (сбрасывается при входе на вкладку)
+
 function refreshHistory() {
-  api('getHistory', {}).then(function (d) { renderList('historyList', d.tickets, true); })
-    .catch(function (e) { listError('historyList', e); });
+  api('getHistory', { page: historyPage }).then(function (d) {
+    historyPage = d.page || 1;
+    renderList('historyList', d.tickets, true);
+    renderHistoryPager(d.page, d.totalPages, d.total);
+  }).catch(function (e) {
+    listError('historyList', e);
+    var p = document.getElementById('historyPager'); if (p) p.innerHTML = '';
+  });
+}
+
+function renderHistoryPager(page, totalPages, total) {
+  var el = document.getElementById('historyPager');
+  if (!el) return;
+  if (!total || totalPages <= 1) { el.innerHTML = ''; return; }
+  el.innerHTML =
+    '<button class="link-btn" ' + (page <= 1 ? 'disabled' : '') + ' onclick="goHistoryPage(' + (page - 1) + ')">← Назад</button>' +
+    '<span class="pager-info">Стр. ' + page + ' из ' + totalPages + ' (' + total + ' заявок)</span>' +
+    '<button class="link-btn" ' + (page >= totalPages ? 'disabled' : '') + ' onclick="goHistoryPage(' + (page + 1) + ')">Вперёд →</button>';
+}
+
+function goHistoryPage(p) {
+  historyPage = p;
+  refreshHistory();
 }
 
 // ============================ ACCESS (админ) ============================
