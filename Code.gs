@@ -1415,3 +1415,29 @@ function notifyBatch_(msgs) {
     try { return !!JSON.parse(responses[idx].getContentText() || '{}').ok; } catch (e) { return false; }
   });
 }
+
+// ============================ РАЗОВЫЕ ВЫГРУЗКИ (ручной запуск) ============================
+// Выбери эту функцию в выпадающем списке редактора → ▶ Выполнить → результат
+// смотри в «Журнал выполнения» (или Ctrl+Enter → View → Executions).
+function debugRestrictedTypeAccess() {
+  return debugRestrictedTypeAccess_(['2116352369','6385304772','1398694890','975893746','1369791792','512953513','1764776025','2108473175','1295198922']);
+}
+
+// Кто видит тип заявки «Перемещение»: админы + id из RESTRICTED_TYPE_IDS (index.html).
+// Отдаёт только тех, у кого есть ФИО в листе «роли»; отдельно — id без записи в «роли».
+function debugRestrictedTypeAccess_(restrictedIds) {
+  var rows = readRoleRows_(); // [tg_id, имя, роль, username, photo_url]
+  var idSet = {};
+  (restrictedIds || []).forEach(function (id) { idSet[String(id)] = true; });
+  var found = {};
+  var withAccess = [];
+  rows.forEach(function (r) {
+    var tgId = String(r[0]), name = r[1], role = r[2], username = r[3];
+    if (idSet[tgId]) found[tgId] = true;
+    var sees = role === 'админ' || idSet[tgId];
+    if (sees && name) withAccess.push({ tg_id: tgId, name: name, username: username || '', role: role });
+  });
+  var notFound = (restrictedIds || []).filter(function (id) { return !found[String(id)]; });
+  Logger.log(JSON.stringify({ withAccess: withAccess, restrictedIdsNotInRoles: notFound }, null, 2));
+  return { withAccess: withAccess, restrictedIdsNotInRoles: notFound };
+}
