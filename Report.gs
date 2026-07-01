@@ -184,13 +184,16 @@ function sectionCityOffice_(sh, top, byOffice) {
     }
   }
 
-  // Офисы вне списка (ТП и прочие)
-  var miscSum = 0;
+  // Офисы вне списка (напр. «ТП») — показываем как отдельный «город» с тем
+  // же именем, что и офис: строка «Итого» + строка самого офиса, наравне с
+  // обычными городами, и попадает в график (а не теряется под «—»).
   Object.keys(byOffice).sort().forEach(function (off) {
-    if (!knownOffices[off] && byOffice[off] > 0) {
-      tableRows.push(['—', off, byOffice[off]]);
-      miscSum += byOffice[off];
-    }
+    if (knownOffices[off] || !byOffice[off]) return;
+    var cnt = byOffice[off];
+    totalRows.push(tableRows.length);
+    tableRows.push([off, 'Итого', cnt]);
+    tableRows.push([off, off, cnt]);
+    cityTotals.push([off, cnt]);
   });
 
   var n = tableRows.length;
