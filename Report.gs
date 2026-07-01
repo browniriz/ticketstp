@@ -19,6 +19,19 @@
 
 var REPORT_SHEET = 'Отчет';
 
+// Города и офисы — для группировки в разделе «1. Заявки по офисам».
+var CITY_OFFICES_MAP = [
+  { city: 'Магнитогорск', offices: ['КМ68','КМ142','КМ198','КМ222','МГН5','МГН6'] },
+  { city: 'Челябинск',    offices: ['К3','Че4','Че2','ЧеЦ'] },
+  { city: 'Екатеринбург', offices: ['ЕКБ1','ЕКБ2','ЕКБ4','ЕКБ5','ЕКБ7','ЕКБ8','ЕКБ9','ЕКБ10','ЕКБ11'] },
+  { city: 'Нижний Тагил', offices: ['НТ1'] },
+  { city: 'Пермь',        offices: ['П1','П2','П4','П5'] },
+  { city: 'Омск',         offices: ['ОМ1','ОМ2','ОМ3','ОМ4'] },
+  { city: 'Красноярск',   offices: ['КР1','КР2'] },
+  { city: 'Барнаул',      offices: ['БР1','БР2','БР3'] },
+  { city: 'Кемерово',     offices: ['КМР1'] }
+];
+
 function buildReport() {
   var ss = getSpreadsheet_();
   var sh = ss.getSheetByName(REPORT_SHEET);
@@ -54,8 +67,7 @@ function buildReport() {
 
   var top = 6;
 
-  top = section_R_(sh, top, '1. Заявки по офисам', ['Офис', 'Заявок'],
-    pairsDesc_R_(byOffice), Charts.ChartType.COLUMN);
+  top = sectionCityOffice_(sh, top, byOffice);
 
   top = section_R_(sh, top, '2. Заявки по типам', ['Тип', 'Заявок'],
     pairsDesc_R_(byType), Charts.ChartType.PIE);
@@ -139,6 +151,84 @@ function setPeriod_(from, to) {
 
 // ===================== Отрисовка секции =====================
 
+// Секция «1. Заявки по офисам» с группировкой по городам.
+// Таблица: Город | Офис | Заявок, с итоговой строкой по каждому городу.
+// График: суммы по городам (данные хранятся в E/F — Google Charts ссылается на диапазон).
+function sectionCityOffice_(sh, top, byOffice) {
+  sh.getRange(top, 1).setValue('1. Заявки по офисам').setFontWeight('bold').setFontSize(13);
+  var headerRow = top + 1;
+  sh.getRange(headerRow, 1, 1, 3).setValues([['Город', 'Офис', 'Заявок']])
+    .setFontWeight('bold').setBackground('#eef1f5');
+
+  var tableRows  = [];  // строки основной таблицы [город, офис, кол-во]
+  var totalRows  = [];  // индексы (0-based от headerRow+1) строк-итогов — для форматирования
+  var cityTotals = [];  // [город, итого] — для графика
+  var knownOffices = {};
+
+  for (var ci = 0; ci < CITY_OFFICES_MAP.length; ci++) {
+    var city    = CITY_OFFICES_MAP[ci].city;
+    var offices = CITY_OFFICES_MAP[ci].offices;
+    var citySum = 0;
+    var offRows = [];
+    for (var oi = 0; oi < offices.length; oi++) {
+      var off = offices[oi];
+      knownOffices[off] = true;
+      var cnt = byOffice[off] || 0;
+      if (cnt > 0) { offRows.push([city, off, cnt]); citySum += cnt; }
+    }
+    if (citySum > 0) {
+      totalRows.push(tableRows.length);           // индекс строки-итога
+      tableRows.push([city, 'Итого', citySum]);   // строка-итог города
+      offRows.forEach(function (r) { tableRows.push(r); });
+      cityTotals.push([city, citySum]);
+    }
+  }
+
+  // Офисы вне списка (ТП и прочие)
+  var miscSum = 0;
+  Object.keys(byOffice).sort().forEach(function (off) {
+    if (!knownOffices[off] && byOffice[off] > 0) {
+      tableRows.push(['—', off, byOffice[off]]);
+      miscSum += byOffice[off];
+    }
+  });
+
+  var n = tableRows.length;
+  if (n) {
+    sh.getRange(headerRow + 1, 1, n, 3).setValues(tableRows);
+    // Явно задаём числовой формат для колонки «Заявок» (col 3) —
+    // иначе Google Sheets может авто-определить целые числа как дату/время.
+    sh.getRange(headerRow, 3, n + 1, 1).setNumberFormat('#,##0');
+    // Выделяем строки-итоги городов жирным и цветом
+    for (var ti = 0; ti < totalRows.length; ti++) {
+      sh.getRange(headerRow + 1 + totalRows[ti], 1, 1, 3)
+        .setFontWeight('bold')
+        .setBackground('#dce8f8');
+    }
+  }
+
+  // График: пишем данные по городам в E/F (НЕ удаляем — график ссылается на диапазон).
+  if (cityTotals.length) {
+    sh.getRange(headerRow, 5).setValue('Город');
+    sh.getRange(headerRow, 6).setValue('Заявок');
+    sh.getRange(headerRow + 1, 5, cityTotals.length, 2).setValues(cityTotals);
+    var chartRange = sh.getRange(headerRow, 5, cityTotals.length + 1, 2);
+    var chart = sh.newChart()
+      .setChartType(Charts.ChartType.COLUMN)
+      .addRange(chartRange)
+      .setNumHeaders(1)
+      .setPosition(headerRow, 7, 0, 0)
+      .setOption('title', '1. Заявки по офисам')
+      .setOption('width', 460)
+      .setOption('height', 300)
+      .setOption('legend', { position: 'none' })
+      .build();
+    sh.insertChart(chart);
+  }
+
+  return Math.max(headerRow + n + 2, top + 16) + 1;
+}
+
 function section_R_(sh, top, title, headers, dataRows, chartType) {
   var headerRow = top;
   if (title) { sh.getRange(top, 1).setValue(title).setFontWeight('bold').setFontSize(13); headerRow = top + 1; }
@@ -146,7 +236,11 @@ function section_R_(sh, top, title, headers, dataRows, chartType) {
   sh.getRange(headerRow, 1, 1, headers.length).setValues([headers])
     .setFontWeight('bold').setBackground('#eef1f5');
   var n = dataRows.length;
-  if (n) sh.getRange(headerRow + 1, 1, n, headers.length).setValues(dataRows);
+  if (n) {
+    sh.getRange(headerRow + 1, 1, n, headers.length).setValues(dataRows);
+    // Защищаем последний столбец (числа) от авто-форматирования в дату/время
+    sh.getRange(headerRow, headers.length, n + 1, 1).setNumberFormat('#,##0');
+  }
 
   if (n) {
     var range = sh.getRange(headerRow, 1, n + 1, 2); // категория + значение (первые 2 столбца)

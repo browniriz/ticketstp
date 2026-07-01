@@ -109,8 +109,13 @@ var STATUS = {
 // (~10-50 мс) вместо медленного обращения к таблице (~0.5-3 с).
 // Любая запись сбрасывает кэш, поэтому данные всегда актуальны; TTL — лишь
 // потолок на случай, если изменений не было. Таймер пересчитывается на лету.
+// Активные и завершённые заявки кэшируются РАЗДЕЛЬНО: getTickets/getHistory
+// читают только свою половину, а не всю историю заявок — иначе по мере роста
+// листа общий кэш упирается в лимит CacheService (100 КБ на значение) и
+// опрос (каждые 4с) начинает бить по таблице напрямую на КАЖДЫЙ запрос.
 var CACHE_TTL_SECONDS = 20;
-var CACHE_KEY_TICKETS = 'ticket_rows_v1';
+var CACHE_KEY_TICKETS_ACTIVE = 'ticket_rows_active_v2';
+var CACHE_KEY_TICKETS_DONE = 'ticket_rows_done_v2';
 var CACHE_KEY_ROLES = 'role_rows_v1';
 
 // ============================ ROUTING ============================
@@ -274,7 +279,8 @@ function setup() {
   var ts = ensureSheet_(ss, SHEET_TICKETS, TICKETS_HEADERS);
   formatTicketColumns_(ts);
   migrateTicketDates_(ts); // существующие ISO-строки → настоящие даты
-  CacheService.getScriptCache().remove(CACHE_KEY_TICKETS);
+  invalidateTicketCache_();
+  invalidateRowMap_();
   ensureSheet_(ss, SHEET_REQUESTS, REQUESTS_HEADERS);
   getAttachmentFolder_(); // создаёт папку в Drive и запрашивает доступ при первом запуске
 
@@ -351,6 +357,26 @@ function migrateTicketDates_(sh) {
 
 // ============================ ROLES =============================
 
+// Роль по tg_id без побочных эффектов (бэкфилла контактов/подмешивания списка
+// заявок) — для внутренних проверок доступа (requireAdmin_, isAuthorized_ и
+// т.п.), чтобы не зациклиться на getRole_, который при роли «админ» сам
+// вызывает getTickets_ (а тот снова проверяет админа).
+function getRoleRaw_(tgId) {
+  tgId = String(tgId || '');
+  if (!tgId) return { role: 'гость', name: '' };
+  var rows = readRoleRows_();
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i][0]) === tgId) {
+      return { role: rows[i][2] || 'сотрудник', name: rows[i][1] || '' };
+    }
+  }
+  return { role: 'гость', name: '' };
+}
+
+// Обработчик действия getRole: то же самое + бэкфилл контактов + для админа
+// сразу отдаёт стартовый список активных заявок. Раньше фронт при открытии
+// делал getRole, а следом ОТДЕЛЬНЫМ запросом getTickets — теперь один
+// круговой запрос вместо двух на первом экране админа.
 function getRole_(body) {
   var tgId = String(body.tg_id || '');
   if (!tgId) return { role: 'гость', name: '' };
@@ -363,7 +389,12 @@ function getRole_(body) {
           (body.tg_photo && String(rows[i][4] || '') !== String(body.tg_photo)))) {
         try { updateRoleContact_(tgId, body.tg_username, body.tg_photo); } catch (e) { Logger.log('backfill: ' + e); }
       }
-      return { role: rows[i][2] || 'сотрудник', name: rows[i][1] || '' };
+      var role = rows[i][2] || 'сотрудник';
+      var result = { role: role, name: rows[i][1] || '' };
+      if (role === 'админ') {
+        try { result.tickets = getTickets_(body).tickets; } catch (e) { Logger.log('getRole tickets: ' + e); }
+      }
+      return result;
     }
   }
   // не внесён в «роли» → доступа нет; сообщаем, отправлял ли уже запрос
@@ -371,7 +402,7 @@ function getRole_(body) {
 }
 
 function isAuthorized_(tgId) {
-  var role = getRole_({ tg_id: tgId }).role;
+  var role = getRoleRaw_(tgId).role;
   return role === 'сотрудник' || role === 'админ';
 }
 
@@ -394,7 +425,7 @@ function readRoleRows_() {
 }
 
 function isAdmin_(tgId) {
-  return getRole_({ tg_id: tgId }).role === 'админ';
+  return getRoleRaw_(tgId).role === 'админ';
 }
 
 function upsertRole_(tgId, name, role, username, photo) {
@@ -470,7 +501,8 @@ function createTicket_(body) {
   // Пишем сразу после последней строки С НОМЕРОМ (столбец A), а не после
   // getLastRow() — иначе посторонний контент в дальних ячейках уводит запись вниз.
   sh.getRange(nextTicketRow_(sh), 1, 1, row.length).setValues([row]);
-  CacheService.getScriptCache().remove(CACHE_KEY_TICKETS);
+  invalidateTicketCache_();
+  invalidateRowMap_();
 
   notify_('🔴 Новая заявка ' + number +
     '\nТип: ' + row[2] +
@@ -493,23 +525,32 @@ function getTickets_(body) {
   requireAdmin_(body);
   // Активные = всё, кроме терминальных (решена/отклонена). «На доработке» видна
   // админам (read-only, ждёт сотрудника), «исправлена» — снова берётся в работу.
-  var all = readTickets_().filter(function (t) {
-    return t.status !== STATUS.DONE && t.status !== STATUS.REJECTED;
-  });
+  var all = readActiveTicketRows_().map(rowToTicket_);
   all.sort(byCreatedDesc_);
   return { tickets: all };
 }
 
+// Страница истории фиксированного размера (не берём из body — иначе клиент
+// мог бы запросить всю историю разом одним большим page size).
+var HISTORY_PAGE_SIZE = 15;
+
 function getHistory_(body) {
   requireAdmin_(body);
   // История = терминальные статусы: решена и отклонена.
-  var done = readTickets_().filter(function (t) {
-    return t.status === STATUS.DONE || t.status === STATUS.REJECTED;
-  });
+  var done = readDoneTicketRows_().map(rowToTicket_);
   done.sort(function (a, b) {
     return String(b.resolvedAt).localeCompare(String(a.resolvedAt));
   });
-  return { tickets: done };
+  var totalPages = Math.max(1, Math.ceil(done.length / HISTORY_PAGE_SIZE));
+  var page = Math.floor(Number(body.page)) || 1;
+  page = Math.min(Math.max(1, page), totalPages);
+  var start = (page - 1) * HISTORY_PAGE_SIZE;
+  return {
+    tickets: done.slice(start, start + HISTORY_PAGE_SIZE),
+    page: page,
+    totalPages: totalPages,
+    total: done.length
+  };
 }
 
 function takeTicket_(body) {
@@ -528,7 +569,7 @@ function takeTicket_(body) {
     }
     row[7] = STATUS.WORK;
     row[9] = String(body.tg_id || '');
-    row[10] = String(body.name || getRole_({ tg_id: body.tg_id }).name || '');
+    row[10] = String(body.name || getRoleRaw_(body.tg_id).name || '');
     row[11] = now;            // work_started_at
     row[14] = now;
     writeRow_(sh, rowIdx, row);
@@ -566,6 +607,7 @@ function resumeTicket_(body) {
 
 function finishTicket_(body) {
   requireAdmin_(body);
+  var comment = String(body.comment || '').trim().slice(0, 1000);
   return withTicket_(body.number, function (sh, rowIdx, row) {
     if (row[7] !== STATUS.WORK && row[7] !== STATUS.PAUSE) {
       throw userError_('Завершить можно только заявку в работе или на паузе.');
@@ -577,9 +619,16 @@ function finishTicket_(body) {
     row[12] = formatMinSec_(acc);
     row[13] = now;            // дата_решения
     row[14] = now;
+    row[17] = comment;        // комментарий администратора при завершении
     writeRow_(sh, rowIdx, row);
-    notify_('🟢 Заявка ' + row[0] + ' решена\nЗатрачено: ' + formatMinSec_(acc) +
-      (row[10] ? '\nИсполнитель: ' + row[10] : ''));
+    var userMsg = '✅ Заявка ' + row[0] + ' решена.' +
+      (comment ? '\nКомментарий: ' + comment : '');
+    notifyBatch_([
+      { chatId: row[8], text: userMsg },
+      { chatId: NOTIFY_CHAT_ID, threadId: NOTIFY_THREAD_ID, text: '🟢 Заявка ' + row[0] + ' решена\nЗатрачено: ' + formatMinSec_(acc) +
+        (row[10] ? '\nИсполнитель: ' + row[10] : '') +
+        (comment ? '\nКомментарий: ' + comment : '') }
+    ]);
     return { ticket: rowToTicket_(row) };
   });
 }
@@ -602,9 +651,12 @@ function returnTicket_(body) {
     row[14] = new Date();
     row[17] = reason;
     writeRow_(sh, rowIdx, row);
-    notifyUser_(row[8], '✏️ Заявка ' + row[0] + ' возвращена на доработку.\nОснование: ' + reason +
-      '\nОткройте приложение, исправьте данные и отправьте заявку снова.');
-    notify_('✏️ Заявка ' + row[0] + ' отправлена на доработку (' + (row[10] || '—') + ')\nОснование: ' + reason);
+    notifyBatch_([
+      { chatId: row[8], text: '✏️ Заявка ' + row[0] + ' возвращена на доработку.\nОснование: ' + reason +
+        '\nОткройте приложение, исправьте данные и отправьте заявку снова.' },
+      { chatId: NOTIFY_CHAT_ID, threadId: NOTIFY_THREAD_ID,
+        text: '✏️ Заявка ' + row[0] + ' отправлена на доработку (' + (row[10] || '—') + ')\nОснование: ' + reason }
+    ]);
     return { ticket: rowToTicket_(row) };
   });
 }
@@ -623,15 +675,18 @@ function rejectTicket_(body) {
     var now = new Date();
     row[7] = STATUS.REJECTED;
     row[9] = String(body.tg_id || row[9] || '');
-    row[10] = String(body.name || getRole_({ tg_id: body.tg_id }).name || row[10] || '');
+    row[10] = String(body.name || getRoleRaw_(body.tg_id).name || row[10] || '');
     row[11] = '';
     row[12] = formatMinSec_(acc);
     row[13] = now;                // дата_решения (для истории)
     row[14] = now;
     row[17] = reason;
     writeRow_(sh, rowIdx, row);
-    notifyUser_(row[8], '🚫 Заявка ' + row[0] + ' отклонена.\nОснование: ' + reason);
-    notify_('🚫 Заявка ' + row[0] + ' отклонена (' + (row[10] || '—') + ')\nОснование: ' + reason);
+    notifyBatch_([
+      { chatId: row[8], text: '🚫 Заявка ' + row[0] + ' отклонена.\nОснование: ' + reason },
+      { chatId: NOTIFY_CHAT_ID, threadId: NOTIFY_THREAD_ID,
+        text: '🚫 Заявка ' + row[0] + ' отклонена (' + (row[10] || '—') + ')\nОснование: ' + reason }
+    ]);
     return { ticket: rowToTicket_(row) };
   });
 }
@@ -677,17 +732,19 @@ function transferTicket_(body) {
   requireAdmin_(body);
   var toId = String(body.to_tg_id || '');
   if (!toId) throw userError_('Не выбран администратор.');
-  var to = getRole_({ tg_id: toId });
+  var to = getRoleRaw_(toId);
   if (to.role !== 'админ') throw userError_('Получатель не является администратором.');
   return withTicket_(body.number, function (sh, rowIdx, row) {
     if (row[7] !== STATUS.WORK && row[7] !== STATUS.PAUSE) {
       throw userError_('Передать можно только заявку в работе или на паузе.');
     }
-    var fromName = String(body.name || getRole_({ tg_id: body.tg_id }).name || row[10] || '');
+    var fromName = String(body.name || getRoleRaw_(body.tg_id).name || row[10] || '');
     row[9] = toId;
     row[10] = to.name || '';
     row[14] = new Date();
     writeRow_(sh, rowIdx, row);
+    // Здесь групповое сообщение зависит от результата личного (доставлено ли),
+    // поэтому вызовы остаются последовательными — параллелить нечего.
     var delivered = notifyUser_(toId, '🔁 Вам передали заявку ' + row[0] +
       (fromName ? ' (от ' + fromName + ')' : ''));
     notify_('🔁 Заявка ' + row[0] + ' передана: ' + (fromName || '—') + ' → ' + (to.name || toId) +
@@ -781,7 +838,7 @@ function renameRole_(body) {
   var name = String(body.target_name || '').trim();
   if (!tgId) throw userError_('Не выбран сотрудник.');
   if (!name) throw userError_('Укажите новое имя.');
-  var role = getRole_({ tg_id: tgId });
+  var role = getRoleRaw_(tgId);
   if (role.role === 'гость') throw userError_('Сотрудник не найден.');
   upsertRole_(tgId, name.slice(0, 80), role.role); // username/photo сохранятся
   return { ok: true, name: name.slice(0, 80) };
@@ -916,41 +973,121 @@ function readTickets_() {
   return readTicketDataRows_().map(function (row) { return rowToTicket_(row); });
 }
 
-// Строки листа "заявки" (без шапки) с кэшем.
+// Полный список строк (активные+история) — нужен только там, где нельзя
+// заранее отфильтровать по статусу (например «Мои заявки» сотрудника).
 function readTicketDataRows_() {
+  return readActiveTicketRows_().concat(readDoneTicketRows_());
+}
+
+// Только активные (не решена/отклонена) — использует getTickets_.
+function readActiveTicketRows_() {
   var cache = CacheService.getScriptCache();
-  var cached = cache.get(CACHE_KEY_TICKETS);
+  var cached = cache.get(CACHE_KEY_TICKETS_ACTIVE);
   if (cached) { try { return JSON.parse(cached); } catch (e) {} }
+  return splitAndCacheTicketRows_().active;
+}
+
+// Только завершённые (решена/отклонена) — использует getHistory_.
+function readDoneTicketRows_() {
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get(CACHE_KEY_TICKETS_DONE);
+  if (cached) { try { return JSON.parse(cached); } catch (e) {} }
+  return splitAndCacheTicketRows_().done;
+}
+
+// Один проход по листу (при промахе обоих кэшей), делит строки на активные и
+// завершённые и кэширует каждую половину отдельно.
+function splitAndCacheTicketRows_() {
   var sh = sheet_(SHEET_TICKETS);
   var rows = sh.getDataRange().getValues();
-  var data = [];
+  var active = [], done = [];
   for (var i = 1; i < rows.length; i++) {
-    if (rows[i][0]) data.push(rows[i]);
+    if (!rows[i][0]) continue;
+    var status = rows[i][7];
+    if (status === STATUS.DONE || status === STATUS.REJECTED) done.push(rows[i]);
+    else active.push(rows[i]);
   }
-  var json = JSON.stringify(data);
-  // CacheService ограничивает значение 100 КБ — крупные объёмы не кэшируем.
-  if (json.length < 95000) cache.put(CACHE_KEY_TICKETS, json, CACHE_TTL_SECONDS);
-  return data;
+  var cache = CacheService.getScriptCache();
+  var aJson = JSON.stringify(active);
+  var dJson = JSON.stringify(done);
+  // CacheService ограничивает значение 100 КБ — крупные объёмы не кэшируем
+  // (тогда просто читаем таблицу напрямую на следующий раз).
+  if (aJson.length < 95000) cache.put(CACHE_KEY_TICKETS_ACTIVE, aJson, CACHE_TTL_SECONDS);
+  if (dJson.length < 95000) cache.put(CACHE_KEY_TICKETS_DONE, dJson, CACHE_TTL_SECONDS);
+  return { active: active, done: done };
+}
+
+function invalidateTicketCache_() {
+  var cache = CacheService.getScriptCache();
+  cache.remove(CACHE_KEY_TICKETS_ACTIVE);
+  cache.remove(CACHE_KEY_TICKETS_DONE);
+}
+
+// ============================ ROW INDEX CACHE (заявки) ============================
+// Номер заявки → номер строки. Строки в листе «заявки» никогда не удаляются и
+// не переставляются, поэтому индекс стабилен: кэшируем надолго и трогаем
+// только при создании новой заявки. Благодаря этому withTicket_ читает ОДНУ
+// строку (18 ячеек) вместо всего листа на каждое действие (взять/пауза/
+// завершить/…), что и было главным тормозом по мере роста истории заявок.
+var CACHE_KEY_ROWMAP = 'ticket_rowmap_v1';
+var ROWMAP_TTL_SECONDS = 3600;
+
+function buildRowMap_(sh) {
+  var last = sh.getLastRow();
+  var map = {};
+  if (last >= 2) {
+    var col = sh.getRange(2, 1, last - 1, 1).getValues();
+    for (var i = 0; i < col.length; i++) {
+      var v = col[i][0];
+      if (v !== '' && v != null) map[String(v)] = i + 2;
+    }
+  }
+  return map;
+}
+
+function getRowMap_(sh) {
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get(CACHE_KEY_ROWMAP);
+  if (cached) { try { return JSON.parse(cached); } catch (e) {} }
+  var map = buildRowMap_(sh);
+  var json = JSON.stringify(map);
+  if (json.length < 95000) cache.put(CACHE_KEY_ROWMAP, json, ROWMAP_TTL_SECONDS);
+  return map;
+}
+
+function invalidateRowMap_() {
+  CacheService.getScriptCache().remove(CACHE_KEY_ROWMAP);
+}
+
+function readTicketRow_(sh, rowIdx) {
+  var raw = sh.getRange(rowIdx, 1, 1, TICKETS_HEADERS.length).getValues()[0];
+  // Нормализуем ширину строки до числа заголовков — на случай лишних
+  // столбцов в листе, иначе setValues упадёт на несовпадении диапазона.
+  var row = raw.slice(0, TICKETS_HEADERS.length);
+  while (row.length < TICKETS_HEADERS.length) row.push('');
+  return row;
 }
 
 function withTicket_(number, fn) {
   var sh = sheet_(SHEET_TICKETS);
-  var rows = sh.getDataRange().getValues();
-  for (var i = 1; i < rows.length; i++) {
-    if (String(rows[i][0]) === String(number)) {
-      // Нормализуем ширину строки до числа заголовков — на случай лишних
-      // столбцов в листе, иначе setValues упадёт на несовпадении диапазона.
-      var row = rows[i].slice(0, TICKETS_HEADERS.length);
-      while (row.length < TICKETS_HEADERS.length) row.push('');
-      return fn(sh, i + 1, row);
-    }
+  var num = String(number);
+  var map = getRowMap_(sh);
+  var rowIdx = map[num];
+  var row = rowIdx ? readTicketRow_(sh, rowIdx) : null;
+  if (!row || String(row[0]) !== num) {
+    // Кэш индекса устарел или заявка только что создана — пересобираем один раз.
+    invalidateRowMap_();
+    map = getRowMap_(sh);
+    rowIdx = map[num];
+    row = rowIdx ? readTicketRow_(sh, rowIdx) : null;
   }
-  throw userError_('Заявка ' + number + ' не найдена.');
+  if (!row || String(row[0]) !== num) throw userError_('Заявка ' + number + ' не найдена.');
+  return fn(sh, rowIdx, row);
 }
 
 function writeRow_(sh, rowIdx, row) {
   sh.getRange(rowIdx, 1, 1, TICKETS_HEADERS.length).setValues([row]);
-  CacheService.getScriptCache().remove(CACHE_KEY_TICKETS);
+  invalidateTicketCache_();
 }
 
 // Номер строки для новой заявки: сразу после последней строки С НОМЕРОМ (столбец A),
@@ -999,10 +1136,24 @@ function toIso_(v) {
   return String(v);
 }
 
-function elapsedSinceStart_(startIso) {
-  if (!startIso) return 0;
-  var diff = (new Date().getTime() - new Date(startIso).getTime()) / 1000;
-  return diff > 0 ? Math.floor(diff) : 0;
+function elapsedSinceStart_(startVal) {
+  if (!startVal) return 0;
+  var d;
+  if (startVal instanceof Date) {
+    d = startVal;
+  } else {
+    var s = String(startVal).trim();
+    d = new Date(s); // ISO и большинство стандартных форматов
+    if (isNaN(d.getTime())) {
+      // Локальный формат Google Sheets при TEXT-колонке: "DD.MM.YYYY HH:mm" или "DD.MM.YYYY HH:mm:ss"
+      var m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+      if (m) d = new Date(+m[3], +m[2] - 1, +m[1], +m[4], +m[5], +(m[6] || 0));
+    }
+  }
+  if (!d || isNaN(d.getTime())) return 0;
+  var diff = (new Date().getTime() - d.getTime()) / 1000;
+  // Минимум 1 секунда когда таймер был запущен — Math.floor(0.x) = 0
+  return diff > 0 ? Math.max(1, Math.floor(diff)) : 0;
 }
 
 function byCreatedDesc_(a, b) {
@@ -1010,9 +1161,10 @@ function byCreatedDesc_(a, b) {
 }
 
 function generateNumber_(sh) {
-  var existing = {};
-  var rows = sh.getDataRange().getValues();
-  for (var i = 1; i < rows.length; i++) existing[String(rows[i][0])] = true;
+  // Раньше здесь читались ВСЕ 18 колонок листа только чтобы собрать множество
+  // занятых номеров — используем уже готовый индекс номер→строка (1 колонка,
+  // обычно из кэша).
+  var existing = getRowMap_(sh);
 
   var letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   for (var attempt = 0; attempt < 200; attempt++) {
@@ -1161,7 +1313,8 @@ function notifyUser_(chatId, text) {
       method: 'post',
       contentType: 'application/json',
       payload: JSON.stringify({ chat_id: String(chatId), text: text }),
-      muteHttpExceptions: true
+      muteHttpExceptions: true,
+      deadline: 10  // таймаут 10 сек
     });
     return !!JSON.parse(res.getContentText() || '{}').ok;
   } catch (err) {
@@ -1178,9 +1331,45 @@ function notify_(text) {
       method: 'post',
       contentType: 'application/json',
       payload: JSON.stringify(payload),
-      muteHttpExceptions: true
+      muteHttpExceptions: true,
+      deadline: 10  // таймаут 10 сек — не даём уведомлению подвесить всё выполнение
     });
   } catch (err) {
     // уведомления не должны ломать основную операцию
   }
+}
+
+// Личное сообщение + сообщение в группу ОДНИМ параллельным запросом
+// (UrlFetchApp.fetchAll), а не двумя последовательными fetch(). Действия вроде
+// «завершить»/«отклонить»/«на доработку»/«передать» раньше ждали два похода в
+// Telegram API подряд, прежде чем ответить клиенту, — теперь один. Возвращает
+// массив булевых (доставлено ли) в том же порядке, что и msgs.
+function notifyBatch_(msgs) {
+  var reqs = [], flags = [];
+  for (var i = 0; i < msgs.length; i++) {
+    var m = msgs[i];
+    if (!m || !m.chatId || !m.text || !BOT_TOKEN) { flags.push(false); continue; }
+    var payload = { chat_id: String(m.chatId), text: m.text };
+    if (m.threadId) payload.message_thread_id = Number(m.threadId);
+    reqs.push({
+      url: 'https://api.telegram.org/bot' + BOT_TOKEN + '/sendMessage',
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true,
+      deadline: 10  // таймаут 10 сек — не даём уведомлению подвесить всё выполнение
+    });
+    flags.push(reqs.length - 1); // индекс в reqs для этого сообщения
+  }
+  if (!reqs.length) return flags.map(function () { return false; });
+  var responses;
+  try {
+    responses = UrlFetchApp.fetchAll(reqs);
+  } catch (err) {
+    return flags.map(function () { return false; }); // уведомления не должны ломать основную операцию
+  }
+  return flags.map(function (idx) {
+    if (idx === false) return false;
+    try { return !!JSON.parse(responses[idx].getContentText() || '{}').ok; } catch (e) { return false; }
+  });
 }

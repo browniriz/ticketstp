@@ -246,6 +246,9 @@
   .reason-box.reject { background: color-mix(in srgb, var(--red) 9%, var(--surface));
     border-color: color-mix(in srgb, var(--red) 32%, transparent); }
   .reason-box.reject .l { color: var(--red); }
+  .reason-box.done { background: color-mix(in srgb, var(--green) 9%, var(--surface));
+    border-color: color-mix(in srgb, var(--green) 32%, transparent); }
+  .reason-box.done .l { color: var(--green); }
 
   /* ---------- States ---------- */
   .empty { text-align: center; color: var(--muted); padding: 48px 20px; font-size: 14px; }
@@ -280,6 +283,12 @@
   .link-btn { background: none; border: none; color: var(--accent); font-size: 12px;
     font-weight: 600; cursor: pointer; padding: 2px 4px; font-family: inherit; text-transform: none; letter-spacing: 0; }
   .link-btn:active { opacity: .6; }
+  .link-btn:disabled { opacity: .3; pointer-events: none; }
+
+  /* ---------- Пагинация истории ---------- */
+  .pager { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 16px; }
+  .pager .link-btn { font-size: 13px; }
+  .pager-info { font-size: 12px; color: var(--muted); }
 
   /* ---------- Lightbox ---------- */
   .lightbox {
@@ -379,6 +388,7 @@
 <section class="screen" id="screen-history">
   <div class="section-title">История решённых заявок</div>
   <div class="cards" id="historyList"><div class="loader">Загрузка…</div></div>
+  <div class="pager" id="historyPager"></div>
 </section>
 
 <!-- ===== Admin: access management ===== -->
@@ -464,8 +474,13 @@ var lastDetailSig = '';        // сигнатура состояния заяв
 var GUEST_PENDING = false;     // гость уже отправил запрос на доступ
 
 var TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Перемещение', 'Оприходование', 'Изъятие'];
-var ADMIN_ONLY_TYPES = [];
-function allTypes() { return TYPES; }
+var RESTRICTED_TYPES = ['Перемещение', 'Оприходование'];
+var RESTRICTED_TYPE_IDS = ['2116352369','6385304772','1398694890','975893746','1369791792','512953513','1764776025','2108473175','1295198922'];
+function allTypes() {
+  var canSeeRestricted = ROLE === 'админ' || RESTRICTED_TYPE_IDS.indexOf(String(TG_ID)) !== -1;
+  if (canSeeRestricted) return TYPES;
+  return TYPES.filter(function (t) { return RESTRICTED_TYPES.indexOf(t) === -1; });
+}
 
 var ADMIN_ONLY_OFFICES = { 'ТП': ['ТП'] };
 function allCities() {
@@ -551,7 +566,9 @@ function loadRole() {
       ROLE = data.role || 'гость';
       GUEST_PENDING = !!data.pending;
       if (data.name) USER_NAME = data.name;
-      buildUI();
+      // Для админа getRole сразу приносит стартовый список активных заявок —
+      // экономит второй круговой запрос (getTickets) на первом экране.
+      buildUI(data.tickets);
     })
     .catch(function (e) {
       ROLE = 'гость';   // при ошибке доступ не выдаём
@@ -560,7 +577,7 @@ function loadRole() {
     });
 }
 
-function buildUI() {
+function buildUI(initialTickets) {
   var roleChip = document.getElementById('roleChip');
   var tabsEl = document.getElementById('tabs');
   tabsEl.innerHTML = '';
@@ -573,7 +590,7 @@ function buildUI() {
     addTab('access', 'Доступы');
     addTab('new', 'Создать');
     initForm();
-    switchView('admin');
+    switchView('admin', initialTickets);
   } else if (ROLE === 'сотрудник') {
     document.getElementById('appTitle').textContent = 'Заявки';
     var prefill = document.getElementById('f-name');
@@ -639,7 +656,7 @@ function addTab(view, label) {
   document.getElementById('tabs').appendChild(b);
 }
 
-function switchView(view) {
+function switchView(view, preloadedTickets) {
   currentView = view;
   var screens = document.querySelectorAll('.screen');
   for (var i = 0; i < screens.length; i++) screens[i].classList.remove('active');
@@ -650,8 +667,14 @@ function switchView(view) {
 
   stopPolling();
   if (view === 'mine')    { refreshMine(); startPolling(refreshMine); }
-  if (view === 'admin')   { refreshAdmin(); startPolling(refreshAdmin); }
-  if (view === 'history') { refreshHistory(); }
+  if (view === 'admin')   {
+    // preloadedTickets приходит только на самом первом открытии (из getRole) —
+    // рисуем сразу, без лишнего круглого запроса; дальше обычный опрос.
+    if (preloadedTickets) renderList('adminList', preloadedTickets, true);
+    else refreshAdmin();
+    startPolling(refreshAdmin);
+  }
+  if (view === 'history') { historyPage = 1; refreshHistory(); }
   if (view === 'access')  { refreshAccess(); startPolling(refreshAccess); }
 }
 
@@ -823,9 +846,32 @@ function refreshAdmin() {
   api('getTickets', {}).then(function (d) { renderList('adminList', d.tickets, true); })
     .catch(function (e) { listError('adminList', e); });
 }
+var historyPage = 1; // текущая страница истории (сбрасывается при входе на вкладку)
+
 function refreshHistory() {
-  api('getHistory', {}).then(function (d) { renderList('historyList', d.tickets, true); })
-    .catch(function (e) { listError('historyList', e); });
+  api('getHistory', { page: historyPage }).then(function (d) {
+    historyPage = d.page || 1;
+    renderList('historyList', d.tickets, true);
+    renderHistoryPager(d.page, d.totalPages, d.total);
+  }).catch(function (e) {
+    listError('historyList', e);
+    var p = document.getElementById('historyPager'); if (p) p.innerHTML = '';
+  });
+}
+
+function renderHistoryPager(page, totalPages, total) {
+  var el = document.getElementById('historyPager');
+  if (!el) return;
+  if (!total || totalPages <= 1) { el.innerHTML = ''; return; }
+  el.innerHTML =
+    '<button class="link-btn" ' + (page <= 1 ? 'disabled' : '') + ' onclick="goHistoryPage(' + (page - 1) + ')">← Назад</button>' +
+    '<span class="pager-info">Стр. ' + page + ' из ' + totalPages + ' (' + total + ' заявок)</span>' +
+    '<button class="link-btn" ' + (page >= totalPages ? 'disabled' : '') + ' onclick="goHistoryPage(' + (page + 1) + ')">Вперёд →</button>';
+}
+
+function goHistoryPage(p) {
+  historyPage = p;
+  refreshHistory();
 }
 
 // ============================ ACCESS (админ) ============================
@@ -1066,7 +1112,7 @@ function renderDetail(t) {
       actions = (t.status === 'в работе'
           ? '<button class="btn btn-pause" data-no="' + no + '" onclick="act(\'pauseTicket\', this.dataset.no)">Пауза</button>'
           : '<button class="btn btn-resume" data-no="' + no + '" onclick="act(\'resumeTicket\', this.dataset.no)">Продолжить</button>') +
-        '<button class="btn btn-finish" data-no="' + no + '" onclick="act(\'finishTicket\', this.dataset.no)">Завершить</button>';
+        '<button class="btn btn-finish" data-no="' + no + '" onclick="openFinish(this.dataset.no)">Завершить</button>';
       secondary =
         '<button class="btn btn-pause" data-no="' + no + '" onclick="openTransfer(this.dataset.no)">Передать</button>' +
         '<button class="btn btn-revision" data-no="' + no + '" onclick="openReason(this.dataset.no, \'revision\')">На доработку</button>' +
@@ -1109,7 +1155,7 @@ function renderDetail(t) {
   lastDetailSig = detailSig(t);
 }
 
-// Блок основания доработки/отклонения (если есть).
+// Блок основания доработки/отклонения/комментария (если есть).
 function reasonHTML(t) {
   if (!t.reason) return '';
   if (t.status === 'отклонена') {
@@ -1117,6 +1163,9 @@ function reasonHTML(t) {
   }
   if (t.status === 'на доработке' || t.status === 'исправлена') {
     return '<div class="reason-box"><div class="l">Причина доработки</div><div class="v">' + esc(t.reason) + '</div></div>';
+  }
+  if (t.status === 'решена') {
+    return '<div class="reason-box done"><div class="l">Комментарий</div><div class="v">' + esc(t.reason) + '</div></div>';
   }
   return '';
 }
@@ -1149,23 +1198,26 @@ function act(action, number) {
   var t = optimistic(prev, action);
   ticketCache[number] = t;
   cacheFetchedAt = performance.now();
-  patchViewList(number, t, action);
+  patchViewList(number, t);
   if (openTicketNo === number) renderDetail(t);
 
-  // 2) Запрос на сервер; ответ — источник истины.
+  // 2) Запрос на сервер; ответ — источник истины. Список уже обновлён
+  // оптимистично, а следующий опрос (раз в 4с, пока экран открыт) подхватит
+  // изменения от других админов — лишний принудительный refetch не нужен.
   api(action, { number: number, name: USER_NAME }).then(function (d) {
     ticketCache[d.ticket.number] = d.ticket;
     cacheFetchedAt = performance.now();
+    patchViewList(d.ticket.number, d.ticket);
     if (openTicketNo === number) renderDetail(d.ticket);
     if (action === 'finishTicket') { toast('Заявка ' + number + ' решена'); setTimeout(closeDetail, 500); }
-    refreshCurrent();
   }).catch(function (e) {
-    // 3) Откат: возвращаем прежнее состояние.
+    // 3) Откат: возвращаем прежнее состояние (в т.ч. обратно в список, если
+    // оптимистично убрали).
     ticketCache[number] = snapshot;
     cacheFetchedAt = performance.now();
+    patchViewList(number, snapshot);
     if (openTicketNo === number) renderDetail(snapshot);
     toast('Не удалось: ' + e.message, true);
-    refreshCurrent();
   });
 }
 
@@ -1185,23 +1237,22 @@ function optimistic(prev, action) {
   return t;
 }
 
-// Мгновенно отражаем изменение в текущем списке.
-function patchViewList(number, t, action) {
+// Мгновенно отражаем изменение в текущем списке (без обращения к серверу).
+// Обрабатывает и обычное обновление карточки, и уход завершённой/отклонённой
+// заявки из активного списка админа, и её возврат при откате неудачного
+// действия (была оптимistично убрана, а сервер вернул ошибку).
+function patchViewList(number, t) {
   var idx = -1;
   for (var i = 0; i < viewTickets.length; i++) { if (viewTickets[i].number === number) { idx = i; break; } }
-  if (idx < 0) return;
-  if (action === 'finishTicket' && viewContainerId === 'adminList') {
-    viewTickets.splice(idx, 1);   // решённая уходит из активных
-  } else {
+  var hideHere = viewContainerId === 'adminList' && (t.status === 'решена' || t.status === 'отклонена');
+  if (hideHere) {
+    if (idx >= 0) viewTickets.splice(idx, 1);
+  } else if (idx >= 0) {
     viewTickets[idx] = t;
+  } else {
+    viewTickets.unshift(t);
   }
   paintList(viewContainerId, viewTickets);
-}
-
-function refreshCurrent() {
-  if (currentView === 'admin') refreshAdmin();
-  else if (currentView === 'history') refreshHistory();
-  else if (currentView === 'mine') refreshMine();
 }
 
 // ============================ TRANSFER ============================
@@ -1256,10 +1307,37 @@ function confirmReason(number, mode) {
   api(action, { number: number, reason: reason, name: USER_NAME }).then(function (d) {
     ticketCache[d.ticket.number] = d.ticket;
     cacheFetchedAt = performance.now();
+    patchViewList(d.ticket.number, d.ticket);
     if (openTicketNo === number) renderDetail(d.ticket);
     toast(mode === 'reject' ? 'Заявка ' + number + ' отклонена' : 'Заявка ' + number + ' отправлена на доработку');
     if (mode === 'reject') setTimeout(closeDetail, 500);
-    refreshCurrent();
+  }).catch(function (e) { toast(e.message, true); });
+}
+
+// ============================ ЗАВЕРШЕНИЕ С КОММЕНТАРИЕМ ============================
+function openFinish(number) {
+  var panel = document.getElementById('actionPanel');
+  if (!panel) return;
+  panel.innerHTML =
+    '<div class="field" style="margin-top:14px"><label>Комментарий (необязательно)</label>' +
+      '<textarea class="control" id="finishComment" placeholder="Напишите комментарий для сотрудника"></textarea></div>' +
+    '<div class="actions">' +
+      '<button class="btn btn-pause" onclick="closeActionPanel()">Отмена</button>' +
+      '<button class="btn btn-finish" data-no="' + esc(number) + '" onclick="confirmFinish(this.dataset.no)">Завершить заявку</button>' +
+    '</div>';
+}
+
+function confirmFinish(number) {
+  var ta = document.getElementById('finishComment');
+  var comment = ta ? ta.value.trim() : '';
+  closeActionPanel();
+  api('finishTicket', { number: number, comment: comment, name: USER_NAME }).then(function (d) {
+    ticketCache[d.ticket.number] = d.ticket;
+    cacheFetchedAt = performance.now();
+    patchViewList(d.ticket.number, d.ticket);
+    if (openTicketNo === number) renderDetail(d.ticket);
+    toast('Заявка ' + number + ' решена');
+    setTimeout(closeDetail, 500);
   }).catch(function (e) { toast(e.message, true); });
 }
 
@@ -1271,9 +1349,9 @@ function doTransfer(number) {
   api('transferTicket', { number: number, to_tg_id: toId, name: USER_NAME }).then(function (d) {
     ticketCache[d.ticket.number] = d.ticket;
     cacheFetchedAt = performance.now();
+    patchViewList(d.ticket.number, d.ticket);
     if (openTicketNo === number) renderDetail(d.ticket);
     toast('Заявка ' + number + ' передана');
-    refreshCurrent();
   }).catch(function (e) { toast(e.message, true); });
 }
 
@@ -1359,9 +1437,9 @@ function doResubmit(number) {
   }).then(function (d) {
     ticketCache[d.ticket.number] = d.ticket;
     cacheFetchedAt = performance.now();
+    patchViewList(d.ticket.number, d.ticket);
     toast('Заявка ' + number + ' отправлена в работу');
     closeDetail();
-    refreshCurrent();
   }).catch(function (e) {
     toast(e.message, true);
     if (btn) { btn.disabled = false; btn.textContent = 'Отправить снова'; }
@@ -1381,9 +1459,9 @@ function onDetailImage(number) {
   }).then(function (d) {
     ticketCache[d.ticket.number] = d.ticket;
     cacheFetchedAt = performance.now();
+    patchViewList(d.ticket.number, d.ticket);
     if (openTicketNo === number) renderDetail(d.ticket);
     toast('Файл прикреплён');
-    refreshCurrent();
   }).catch(function (e) { toast(e.message, true); });
 }
 
