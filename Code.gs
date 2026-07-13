@@ -544,16 +544,17 @@ function getHistory_(body) {
   // История = терминальные статусы: решена и отклонена.
   var done = readDoneTicketRows_().map(rowToTicket_);
 
-  var q = String(body.q || '').trim().toLowerCase();
+  var q = searchText_(body.q);
   if (q) {
     done = done.filter(function (t) {
-      return String(t.number || '').toLowerCase().indexOf(q) !== -1 ||
-             (t.description || '').toLowerCase().indexOf(q) !== -1 ||
-             (t.senderName || '').toLowerCase().indexOf(q) !== -1 ||
-             (t.type || '').toLowerCase().indexOf(q) !== -1 ||
-             (t.city || '').toLowerCase().indexOf(q) !== -1 ||
-             (t.office || '').toLowerCase().indexOf(q) !== -1 ||
-             (t.adminName || '').toLowerCase().indexOf(q) !== -1;
+      return searchText_(t.number).indexOf(q) !== -1 ||
+             searchText_(t.description).indexOf(q) !== -1 ||
+             searchText_(t.senderName).indexOf(q) !== -1 ||
+             searchText_(t.type).indexOf(q) !== -1 ||
+             searchText_(t.city).indexOf(q) !== -1 ||
+             searchText_(t.office).indexOf(q) !== -1 ||
+             searchText_(t.adminName).indexOf(q) !== -1 ||
+             searchText_(t.reason).indexOf(q) !== -1;
     });
   }
 
@@ -1264,6 +1265,14 @@ function toIso_(v) {
   if (v == null || v === '') return '';
   if (v instanceof Date) return v.toISOString();
   return String(v);
+}
+
+// Безопасная нормализация для поиска: в таблице часть полей иногда приходит
+// не строками (числа/даты из Google Sheets). Прямой `.toLowerCase()` на таких
+// значениях валил поиск истории с generic 500, хотя обычная история открывалась.
+function searchText_(v) {
+  if (v == null || v === '') return '';
+  return String(v).trim().toLowerCase();
 }
 
 function elapsedSinceStart_(startVal) {
