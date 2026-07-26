@@ -283,7 +283,7 @@ function setup() {
   ensureSheet_(ss, SHEET_ROLES, ROLES_HEADERS);
   var ts = ensureSheet_(ss, SHEET_TICKETS, TICKETS_HEADERS);
   formatTicketColumns_(ts);
-  migrateTicketDates_(ts); // существующие ISO-строки → настоящие даты
+  migrateTicketDates_(ts); // существующие Date → ISO-строки
   invalidateTicketCache_();
   invalidateRowMap_();
   ensureSheet_(ss, SHEET_REQUESTS, REQUESTS_HEADERS);
@@ -319,28 +319,19 @@ function ensureSheet_(ss, name, headers) {
 
 // Часовой пояс и формат отображения дат в таблице.
 var DISPLAY_TZ = 'Asia/Yekaterinburg'; // UTC+5 (Пермь/Екатеринбург/Челябинск/Магнитогорск)
-var SHEET_DATE_FORMAT = 'dd.MM.yyyy HH:mm';
 
-// Даты теперь хранятся как НАСТОЯЩИЕ даты (формат дд.ММ.гггг чч:мм, местное время),
-// а длительности/ссылки/текст — как «обычный текст».
-// Колонки с датами и длительностями — формат «обычный текст», иначе Google Sheets
-// сам превращает "2026-..Z" и "ММ:СС" в дату/время и ломает расчёт таймера.
+// Все служебные даты и длительности храним как текст. В этой таблице значения
+// Apps Script Date в служебных колонках очищаются при записи; ISO-строки
+// сохраняются стабильно и однозначно разбираются сервером.
 function formatTicketColumns_(sh) {
   var rows = sh.getMaxRows();
-  // Колонки-даты (1-based): дата_создания(2), work_started_at(12), дата_решения(14), последнее_изменение(15)
-  var dateCols = [2, 12, 14, 15];
-  // Текстовые: Затраченное время(13), Время не в работе(16), Файл(17), основание(18)
-  var textCols = [13, 16, 17, 18];
-  for (var i = 0; i < dateCols.length; i++) {
-    sh.getRange(1, dateCols[i], rows, 1).setNumberFormat(SHEET_DATE_FORMAT);
-  }
-  for (var j = 0; j < textCols.length; j++) {
-    sh.getRange(1, textCols[j], rows, 1).setNumberFormat('@');
+  var textCols = [2, 12, 13, 14, 15, 16, 17, 18];
+  for (var i = 0; i < textCols.length; i++) {
+    sh.getRange(1, textCols[i], rows, 1).setNumberFormat('@');
   }
 }
 
-// Разовая миграция: существующие ISO-строки в датных колонках → настоящие Date,
-// чтобы отображались как дд.ММ.гггг чч:мм в местном времени. Запускается из setup().
+// Разовая миграция: существующие Date → ISO-строки. Запускается из setup().
 function migrateTicketDates_(sh) {
   var dateCols = [2, 12, 14, 15];
   var last = sh.getLastRow();
@@ -351,9 +342,9 @@ function migrateTicketDates_(sh) {
     var changed = false;
     for (var i = 0; i < vals.length; i++) {
       var v = vals[i][0];
-      if (typeof v === 'string' && v) {
-        var d = new Date(v);
-        if (!isNaN(d.getTime())) { vals[i][0] = d; changed = true; }
+      if (v instanceof Date && !isNaN(v.getTime())) {
+        vals[i][0] = v.toISOString();
+        changed = true;
       }
     }
     if (changed) rng.setValues(vals);
@@ -482,7 +473,7 @@ function createTicket_(body) {
   }
   var sh = sheet_(SHEET_TICKETS);
   var number = generateNumber_(sh);
-  var now = new Date();
+  var now = nowIso_();
   var fileUrl = body.image ? saveFile_(body.image, number, body.filename) : '';
 
   var row = [
@@ -581,7 +572,7 @@ function takeTicket_(body) {
     if (row[7] !== STATUS.NEW && row[7] !== STATUS.FIXED) {
       throw userError_('Заявку нельзя взять в работу в текущем статусе.');
     }
-    var now = new Date();
+    var now = nowIso_();
     // «Время не в работе»: от создания до первого взятия (заполняется один раз).
     if (!row[15] && row[1]) {
       var idleSec = Math.max(0, Math.floor((new Date(now).getTime() - new Date(row[1]).getTime()) / 1000));
@@ -606,7 +597,7 @@ function pauseTicket_(body) {
     row[7] = STATUS.PAUSE;
     row[11] = '';             // таймер остановлен
     row[12] = formatMinSec_(acc);
-    row[14] = new Date();
+    row[14] = nowIso_();
     writeRow_(sh, rowIdx, row);
     return { ticket: rowToTicket_(row) };
   });
@@ -617,7 +608,7 @@ function resumeTicket_(body) {
   return withTicket_(body.number, function (sh, rowIdx, row) {
     if (row[7] !== STATUS.PAUSE) throw userError_('Заявку нельзя возобновить.');
     row[7] = STATUS.WORK;
-    row[11] = new Date();
+    row[11] = nowIso_();
     row[14] = row[11];
     writeRow_(sh, rowIdx, row);
     notify_('🟡 Заявка ' + row[0] + ' снова в работе');
@@ -633,7 +624,7 @@ function finishTicket_(body) {
       throw userError_('Завершить можно только заявку в работе или на паузе.');
     }
     var acc = parseDuration_(row[12]) + elapsedSinceStart_(row[11]);
-    var now = new Date();
+    var now = nowIso_();
     row[7] = STATUS.DONE;
     row[11] = '';
     row[12] = formatMinSec_(acc);
@@ -668,7 +659,7 @@ function returnTicket_(body) {
     row[7] = STATUS.REVISION;
     row[11] = '';                 // таймер остановлен
     row[12] = formatMinSec_(acc); // накопленное сохранено
-    row[14] = new Date();
+    row[14] = nowIso_();
     row[17] = reason;
     writeRow_(sh, rowIdx, row);
     notifyBatch_([
@@ -692,7 +683,7 @@ function rejectTicket_(body) {
       throw userError_('Заявка уже закрыта.');
     }
     var acc = parseDuration_(row[12]) + elapsedSinceStart_(row[11]);
-    var now = new Date();
+    var now = nowIso_();
     row[7] = STATUS.REJECTED;
     row[9] = String(body.tg_id || row[9] || '');
     row[10] = String(body.name || getRoleRaw_(body.tg_id).name || row[10] || '');
@@ -739,7 +730,7 @@ function resubmitTicket_(body) {
     row[6] = String(body.description).trim();
     if (body.image) row[16] = saveFile_(body.image, row[0], body.filename); // замена вложения по желанию
     row[7] = STATUS.FIXED;
-    row[14] = new Date();
+    row[14] = nowIso_();
     writeRow_(sh, rowIdx, row);
     notify_('🔧 Заявка ' + row[0] + ' исправлена и возвращена в работу\nТип: ' + row[2] +
       '\nГород/офис: ' + row[3] + ' / ' + row[4] + '\nОт: ' + row[5]);
@@ -761,7 +752,7 @@ function transferTicket_(body) {
     var fromName = String(body.name || getRoleRaw_(body.tg_id).name || row[10] || '');
     row[9] = toId;
     row[10] = to.name || '';
-    row[14] = new Date();
+    row[14] = nowIso_();
     writeRow_(sh, rowIdx, row);
     // Здесь групповое сообщение зависит от результата личного (доставлено ли),
     // поэтому вызовы остаются последовательными — параллелить нечего.
@@ -780,7 +771,7 @@ function addScreenshot_(body) {
   rateLimit_(body.tg_id, 'file', 60);
   return withTicket_(body.number, function (sh, rowIdx, row) {
     row[16] = saveFile_(body.image, row[0], body.filename);
-    row[14] = new Date();
+    row[14] = nowIso_();
     writeRow_(sh, rowIdx, row);
     return { ticket: rowToTicket_(row) };
   });
@@ -1216,7 +1207,17 @@ function withTicket_(number, fn) {
   return fn(sh, rowIdx, row);
 }
 
+function normalizeTicketDateCells_(row) {
+  var dateIndexes = [1, 11, 13, 14];
+  for (var i = 0; i < dateIndexes.length; i++) {
+    var idx = dateIndexes[i];
+    if (row[idx] instanceof Date) row[idx] = row[idx].toISOString();
+  }
+  return row;
+}
+
 function writeRow_(sh, rowIdx, row) {
+  normalizeTicketDateCells_(row);
   sh.getRange(rowIdx, 1, 1, TICKETS_HEADERS.length).setValues([row]);
   invalidateTicketCache_();
 }
@@ -1238,8 +1239,8 @@ function rowToTicket_(row) {
   var elapsed = acc + (running ? elapsedSinceStart_(row[11]) : 0);
   return {
     number: row[0],
-    // Даты отдаём фронту всегда как ISO-строку (в ячейке теперь хранится Date) —
-    // так стабильна сортировка на сервере и разбор на клиенте.
+    // Даты отдаём фронту всегда как ISO-строки; legacy Date тоже нормализуем —
+    // так стабильны сортировка на сервере и разбор на клиенте.
     createdAt: toIso_(row[1]),
     type: row[2],
     city: row[3],
@@ -1258,6 +1259,10 @@ function rowToTicket_(row) {
     resolvedAt: toIso_(row[13]),
     updatedAt: toIso_(row[14])
   };
+}
+
+function nowIso_() {
+  return new Date().toISOString();
 }
 
 // Значение даты из ячейки (Date или строка) → ISO-строка ('' если пусто).
