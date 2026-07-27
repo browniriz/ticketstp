@@ -538,14 +538,15 @@ var revFileName = '';          // исходное имя файла при до
 var lastDetailNo = null;       // для какой заявки последний раз рисовали детали
 var lastDetailSig = '';        // сигнатура состояния заявки (чтобы не перерисовывать зря)
 var GUEST_PENDING = false;     // гость уже отправил запрос на доступ
+var ALLOWED_TYPES = null;      // список приходит с сервера из флажков листа «роли»
 
 var TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Перемещение', 'Оприходование', 'Изъятие'];
-var RESTRICTED_TYPES = ['Перемещение', 'Оприходование'];
-var RESTRICTED_TYPE_IDS = ['2116352369','6385304772','1398694890','975893746','1369791792','512953513','1764776025','2108473175','1295198922','1231866253'];
 function allTypes() {
-  var canSeeRestricted = ROLE === 'админ' || RESTRICTED_TYPE_IDS.indexOf(String(TG_ID)) !== -1;
-  if (canSeeRestricted) return TYPES;
-  return TYPES.filter(function (t) { return RESTRICTED_TYPES.indexOf(t) === -1; });
+  if (ROLE === 'админ') return TYPES.slice();
+  if (!Array.isArray(ALLOWED_TYPES)) {
+    return TYPES.filter(function (t) { return t !== 'Перемещение' && t !== 'Оприходование'; });
+  }
+  return TYPES.filter(function (t) { return ALLOWED_TYPES.indexOf(t) !== -1; });
 }
 
 var ADMIN_ONLY_OFFICES = { 'ТП': ['ТП'] };
@@ -630,6 +631,7 @@ function loadRole() {
   api('getRole', {})
     .then(function (data) {
       ROLE = data.role || 'гость';
+      ALLOWED_TYPES = Array.isArray(data.allowedTypes) ? data.allowedTypes : null;
       GUEST_PENDING = !!data.pending;
       if (data.name) USER_NAME = data.name;
       // Для админа getRole сразу приносит стартовый список активных заявок —
@@ -638,6 +640,7 @@ function loadRole() {
     })
     .catch(function (e) {
       ROLE = 'гость';   // при ошибке доступ не выдаём
+      ALLOWED_TYPES = null;
       buildUI();
       if (API_URL) toast(e.message, true);
     });

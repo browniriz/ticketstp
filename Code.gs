@@ -70,8 +70,19 @@ var SHEET_ROLES = 'роли';
 var SHEET_TICKETS = 'заявки';
 var SHEET_REQUESTS = 'запросы';
 
-var ROLES_HEADERS = ['tg_id', 'имя', 'роль', 'username', 'photo_url']; // роль: сотрудник | админ
+var TICKET_TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Перемещение', 'Оприходование', 'Изъятие'];
+var DEFAULT_EMPLOYEE_TICKET_TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Изъятие'];
+var ROLE_BASE_COLUMNS = 5;
+var ROLE_TYPE_START_COLUMN = ROLE_BASE_COLUMNS + 1;
+var ROLES_HEADERS = ['tg_id', 'имя', 'роль', 'username', 'photo_url'].concat(TICKET_TYPES); // роль: сотрудник | админ
 var REQUESTS_HEADERS = ['tg_id', 'имя', 'дата_запроса', 'username', 'photo_url']; // ожидающие одобрения доступа
+
+// Используется только при первой миграции старой таблицы: эти сотрудники раньше
+// получали «Перемещение» и «Оприходование» из списка в index.html.
+var LEGACY_RESTRICTED_TYPE_IDS = [
+  '2116352369', '6385304772', '1398694890', '975893746', '1369791792',
+  '512953513', '1764776025', '2108473175', '1295198922', '1231866253'
+];
 
 var TICKETS_HEADERS = [
   'номер',              // 0  A047
@@ -116,7 +127,7 @@ var STATUS = {
 var CACHE_TTL_SECONDS = 20;
 var CACHE_KEY_TICKETS_ACTIVE = 'ticket_rows_active_v2';
 var CACHE_KEY_TICKETS_DONE = 'ticket_rows_done_v2';
-var CACHE_KEY_ROLES = 'role_rows_v1';
+var CACHE_KEY_ROLES = 'role_rows_v2';
 // Лидерборд хранит уже посчитанные агрегаты (не сырые строки), поэтому не
 // упирается в лимит CacheService даже при большой истории заявок.
 var CACHE_KEY_LEADERBOARD_ALL = 'leaderboard_all_v1';
@@ -280,7 +291,8 @@ function setup() {
   }
   var ss = getSpreadsheet_();
   try { ss.setSpreadsheetTimeZone(DISPLAY_TZ); SpreadsheetApp.flush(); } catch (e) { Logger.log('tz: ' + e); } // местное время (UTC+5)
-  ensureSheet_(ss, SHEET_ROLES, ROLES_HEADERS);
+  var rs = ensureSheet_(ss, SHEET_ROLES, ROLES_HEADERS);
+  setupRoleTypeAccess_(rs);
   var ts = ensureSheet_(ss, SHEET_TICKETS, TICKETS_HEADERS);
   formatTicketColumns_(ts);
   migrateTicketDates_(ts); // существующие Date → ISO-строки
@@ -296,7 +308,7 @@ function setup() {
       if (id) upsertRole_(id, BOOTSTRAP_ADMIN_NAME, 'админ');
     }
   }
-  return 'OK: листы созданы, админ(ы) добавлены.';
+  return 'OK: листы созданы, доступ к типам настроен, админ(ы) добавлены.';
 }
 
 function getSpreadsheet_() {
@@ -309,12 +321,63 @@ function getSpreadsheet_() {
 function ensureSheet_(ss, name, headers) {
   var sh = ss.getSheetByName(name);
   if (!sh) sh = ss.insertSheet(name);
+  if (sh.getMaxColumns() < headers.length) {
+    sh.insertColumnsAfter(sh.getMaxColumns(), headers.length - sh.getMaxColumns());
+  }
   // Всегда синхронизируем строку заголовков: это и создаёт их с нуля, и
   // мигрирует при переименовании/добавлении столбцов (данные строк не трогаются).
   sh.getRange(1, 1, 1, headers.length).setValues([headers]);
   sh.setFrozenRows(1);
   sh.getRange(1, 1, 1, headers.length).setFontWeight('bold');
   return sh;
+}
+
+// Разовая настройка матрицы типов в листе «роли». Можно безопасно запускать
+// повторно: уже заполненные флажки не перезаписываются.
+function setupRoleTypeAccess() {
+  var sh = ensureSheet_(getSpreadsheet_(), SHEET_ROLES, ROLES_HEADERS);
+  var migrated = setupRoleTypeAccess_(sh);
+  CacheService.getScriptCache().remove(CACHE_KEY_ROLES);
+  return 'OK: матрица типов настроена; перенесено строк: ' + migrated + '.';
+}
+
+function setupRoleTypeAccess_(sh) {
+  var lastRow = sh.getLastRow();
+  var typeCount = TICKET_TYPES.length;
+  var migrated = 0;
+
+  if (lastRow >= 2) {
+    var rows = sh.getRange(2, 1, lastRow - 1, ROLES_HEADERS.length).getValues();
+    var flags = [];
+    for (var i = 0; i < rows.length; i++) {
+      var existing = rows[i].slice(ROLE_BASE_COLUMNS, ROLE_BASE_COLUMNS + typeCount);
+      if (hasRoleTypeConfiguration_(existing)) {
+        flags.push(existing.map(roleTypeCellChecked_));
+        continue;
+      }
+      flags.push(defaultRoleTypeFlags_(rows[i][2], rows[i][0], true));
+      migrated++;
+    }
+    sh.getRange(2, ROLE_TYPE_START_COLUMN, flags.length, typeCount).setValues(flags);
+  }
+
+  if (sh.getMaxRows() >= 2) {
+    var checkboxRule = SpreadsheetApp.newDataValidation()
+      .requireCheckbox()
+      .setAllowInvalid(false)
+      .build();
+    sh.getRange(2, ROLE_TYPE_START_COLUMN, sh.getMaxRows() - 1, typeCount)
+      .setDataValidation(checkboxRule);
+  }
+
+  var notes = TICKET_TYPES.map(function (type) {
+    return 'Флажок включён — сотрудник может создавать заявки типа «' + type + '». Для администраторов ограничения не применяются.';
+  });
+  sh.getRange(1, ROLE_TYPE_START_COLUMN, 1, typeCount)
+    .setNotes([notes])
+    .setBackground('#d9ead3');
+  sh.autoResizeColumns(ROLE_TYPE_START_COLUMN, typeCount);
+  return migrated;
 }
 
 // Часовой пояс и формат отображения дат в таблице.
@@ -359,14 +422,18 @@ function migrateTicketDates_(sh) {
 // вызывает getTickets_ (а тот снова проверяет админа).
 function getRoleRaw_(tgId) {
   tgId = String(tgId || '');
-  if (!tgId) return { role: 'гость', name: '' };
+  if (!tgId) return { role: 'гость', name: '', allowedTypes: [] };
   var rows = readRoleRows_();
   for (var i = 0; i < rows.length; i++) {
     if (String(rows[i][0]) === tgId) {
-      return { role: rows[i][2] || 'сотрудник', name: rows[i][1] || '' };
+      return {
+        role: rows[i][2] || 'сотрудник',
+        name: rows[i][1] || '',
+        allowedTypes: allowedTicketTypesForRoleRow_(rows[i])
+      };
     }
   }
-  return { role: 'гость', name: '' };
+  return { role: 'гость', name: '', allowedTypes: [] };
 }
 
 // Обработчик действия getRole: то же самое + бэкфилл контактов + для админа
@@ -386,7 +453,11 @@ function getRole_(body) {
         try { updateRoleContact_(tgId, body.tg_username, body.tg_photo); } catch (e) { Logger.log('backfill: ' + e); }
       }
       var role = rows[i][2] || 'сотрудник';
-      var result = { role: role, name: rows[i][1] || '' };
+      var result = {
+        role: role,
+        name: rows[i][1] || '',
+        allowedTypes: allowedTicketTypesForRoleRow_(rows[i])
+      };
       if (role === 'админ') {
         try { result.tickets = getTickets_(body).tickets; } catch (e) { Logger.log('getRole tickets: ' + e); }
       }
@@ -394,7 +465,7 @@ function getRole_(body) {
     }
   }
   // не внесён в «роли» → доступа нет; сообщаем, отправлял ли уже запрос
-  return { role: 'гость', name: '', pending: hasPendingRequest_(tgId) };
+  return { role: 'гость', name: '', allowedTypes: [], pending: hasPendingRequest_(tgId) };
 }
 
 function isAuthorized_(tgId) {
@@ -412,8 +483,12 @@ function readRoleRows_() {
   var data = [];
   for (var i = 1; i < rows.length; i++) {
     if (rows[i][0] !== '' && rows[i][0] != null) {
-      // [tg_id, имя, роль, username, photo_url]
-      data.push([String(rows[i][0]), rows[i][1], rows[i][2], rows[i][3] || '', rows[i][4] || '']);
+      // [tg_id, имя, роль, username, photo_url, ...флажки типов]
+      var roleRow = [String(rows[i][0]), rows[i][1], rows[i][2], rows[i][3] || '', rows[i][4] || ''];
+      for (var c = ROLE_BASE_COLUMNS; c < ROLES_HEADERS.length; c++) {
+        roleRow.push(rows[i][c] == null ? '' : rows[i][c]);
+      }
+      data.push(roleRow);
     }
   }
   cache.put(CACHE_KEY_ROLES, JSON.stringify(data), CACHE_TTL_SECONDS);
@@ -422,6 +497,52 @@ function readRoleRows_() {
 
 function isAdmin_(tgId) {
   return getRoleRaw_(tgId).role === 'админ';
+}
+
+function hasRoleTypeConfiguration_(cells) {
+  for (var i = 0; i < cells.length; i++) {
+    if (cells[i] !== '' && cells[i] != null) return true;
+  }
+  return false;
+}
+
+function roleTypeCellChecked_(value) {
+  if (value === true) return true;
+  var normalized = String(value == null ? '' : value).trim().toLowerCase();
+  return normalized === 'true' || normalized === 'да' || normalized === '1' ||
+    normalized === 'yes' || normalized === 'x' || normalized === '✓';
+}
+
+function defaultRoleTypeFlags_(role, tgId, includeLegacyAccess) {
+  if (String(role || '') === 'админ') {
+    return TICKET_TYPES.map(function () { return true; });
+  }
+  var legacyFullAccess = includeLegacyAccess &&
+    LEGACY_RESTRICTED_TYPE_IDS.indexOf(String(tgId || '')) !== -1;
+  return TICKET_TYPES.map(function (type) {
+    return legacyFullAccess || DEFAULT_EMPLOYEE_TICKET_TYPES.indexOf(type) !== -1;
+  });
+}
+
+function allowedTicketTypesForRoleRow_(row) {
+  if (String(row[2] || '') === 'админ') return TICKET_TYPES.slice();
+  var cells = row.slice(ROLE_BASE_COLUMNS, ROLE_BASE_COLUMNS + TICKET_TYPES.length);
+  if (!hasRoleTypeConfiguration_(cells)) {
+    return TICKET_TYPES.filter(function (type) {
+      return DEFAULT_EMPLOYEE_TICKET_TYPES.indexOf(type) !== -1;
+    });
+  }
+  return TICKET_TYPES.filter(function (type, index) {
+    return roleTypeCellChecked_(cells[index]);
+  });
+}
+
+function assertTicketTypeAllowed_(tgId, type) {
+  type = String(type || '').trim();
+  var access = getRoleRaw_(tgId);
+  if (access.allowedTypes.indexOf(type) === -1) {
+    throw userError_('Тип заявки «' + type + '» недоступен для вашего аккаунта. Обратитесь к администратору.');
+  }
 }
 
 function upsertRole_(tgId, name, role, username, photo) {
@@ -437,7 +558,9 @@ function upsertRole_(tgId, name, role, username, photo) {
       return;
     }
   }
-  sh.appendRow([tgId, name, role, username || '', photo || '']);
+  var newRow = [tgId, name, role, username || '', photo || '']
+    .concat(defaultRoleTypeFlags_(role, tgId, false));
+  sh.appendRow(newRow);
   CacheService.getScriptCache().remove(CACHE_KEY_ROLES);
 }
 
@@ -471,6 +594,7 @@ function createTicket_(body) {
       throw userError_('Не заполнено поле: ' + required[i]);
     }
   }
+  assertTicketTypeAllowed_(body.tg_id, body.type);
   var sh = sheet_(SHEET_TICKETS);
   var number = generateNumber_(sh);
   var now = nowIso_();
@@ -716,6 +840,7 @@ function resubmitTicket_(body) {
       throw userError_('Не заполнено поле: ' + required[i]);
     }
   }
+  assertTicketTypeAllowed_(body.tg_id, body.type);
   return withTicket_(body.number, function (sh, rowIdx, row) {
     if (String(row[8]) !== String(body.tg_id || '')) {
       throw userError_('Дорабатывать заявку может только её автор.');
@@ -1016,6 +1141,17 @@ function removeRole_(tgId) {
     if (String(rows[i][0]) === String(tgId)) sh.deleteRow(i + 1);
   }
   CacheService.getScriptCache().remove(CACHE_KEY_ROLES);
+}
+
+// Ручные изменения флажков в Google Таблице сразу сбрасывают кэш ролей.
+function onEdit(e) {
+  try {
+    if (e && e.range && e.range.getSheet().getName() === SHEET_ROLES) {
+      CacheService.getScriptCache().remove(CACHE_KEY_ROLES);
+    }
+  } catch (err) {
+    Logger.log('onEdit roles cache: ' + err);
+  }
 }
 
 function requestsSheet_() {
@@ -1522,24 +1658,20 @@ function notifyBatch_(msgs) {
 // Выбери эту функцию в выпадающем списке редактора → ▶ Выполнить → результат
 // смотри в «Журнал выполнения» (или Ctrl+Enter → View → Executions).
 function debugRestrictedTypeAccess() {
-  return debugRestrictedTypeAccess_(['2116352369','6385304772','1398694890','975893746','1369791792','512953513','1764776025','2108473175','1295198922']);
+  return debugTicketTypeAccess_('Перемещение');
 }
 
-// Кто видит тип заявки «Перемещение»: админы + id из RESTRICTED_TYPE_IDS (index.html).
-// Отдаёт только тех, у кого есть ФИО в листе «роли»; отдельно — id без записи в «роли».
-function debugRestrictedTypeAccess_(restrictedIds) {
-  var rows = readRoleRows_(); // [tg_id, имя, роль, username, photo_url]
-  var idSet = {};
-  (restrictedIds || []).forEach(function (id) { idSet[String(id)] = true; });
-  var found = {};
+// Кто видит выбранный тип заявки согласно флажкам в листе «роли».
+function debugTicketTypeAccess_(type) {
+  type = String(type || '').trim();
+  if (TICKET_TYPES.indexOf(type) === -1) throw userError_('Неизвестный тип заявки: ' + type);
+  var rows = readRoleRows_();
   var withAccess = [];
   rows.forEach(function (r) {
-    var tgId = String(r[0]), name = r[1], role = r[2], username = r[3];
-    if (idSet[tgId]) found[tgId] = true;
-    var sees = role === 'админ' || idSet[tgId];
-    if (sees && name) withAccess.push({ tg_id: tgId, name: name, username: username || '', role: role });
+    if (allowedTicketTypesForRoleRow_(r).indexOf(type) !== -1 && r[1]) {
+      withAccess.push({ tg_id: String(r[0]), name: r[1], username: r[3] || '', role: r[2] });
+    }
   });
-  var notFound = (restrictedIds || []).filter(function (id) { return !found[String(id)]; });
-  Logger.log(JSON.stringify({ withAccess: withAccess, restrictedIdsNotInRoles: notFound }, null, 2));
-  return { withAccess: withAccess, restrictedIdsNotInRoles: notFound };
+  Logger.log(JSON.stringify({ type: type, withAccess: withAccess }, null, 2));
+  return { type: type, withAccess: withAccess };
 }
