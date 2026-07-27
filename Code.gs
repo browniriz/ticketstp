@@ -525,6 +525,69 @@ function repairTicketDataAndFormatting_(sh) {
   return result;
 }
 
+// Разовое восстановление исторических заявок по встроенной истории правок
+// Google Sheets. Временные точки в истории отображаются с точностью до минуты,
+// поэтому восстановленные секунды равны 00, кроме Z051, где 05:10 подтверждается
+// уже сохранённым временем вне работы.
+function restoreTicketsFromCellHistory() {
+  var repairs = [
+    { number: 'S574', createdAt: '25.07.2026 16:12:00', spent: '01:00', resolvedAt: '25.07.2026 16:34:00', updatedAt: '25.07.2026 16:34:00', idle: '21:00' },
+    { number: 'J710', createdAt: '25.07.2026 16:24:00', spent: '00:00', resolvedAt: '25.07.2026 16:31:00', updatedAt: '25.07.2026 16:31:00', idle: '07:00' },
+    { number: 'Z051', resolvedAt: '25.07.2026 17:05:10', updatedAt: '25.07.2026 17:05:10' },
+    { number: 'M004', createdAt: '25.07.2026 18:02:00', spent: '00:00', resolvedAt: '25.07.2026 18:15:00', updatedAt: '25.07.2026 18:15:00', idle: '13:00' },
+    { number: 'S605', createdAt: '25.07.2026 18:07:00', spent: '00:00', resolvedAt: '25.07.2026 18:20:00', updatedAt: '25.07.2026 18:20:00', idle: '13:00' },
+    { number: 'O712', createdAt: '25.07.2026 19:12:00', spent: '00:00', resolvedAt: '25.07.2026 19:20:00', updatedAt: '25.07.2026 19:20:00', idle: '08:00' },
+    { number: 'K709', createdAt: '25.07.2026 22:03:00', spent: '00:00', resolvedAt: '26.07.2026 09:16:00', updatedAt: '26.07.2026 09:16:00', idle: '673:00' },
+    { number: 'B430', createdAt: '25.07.2026 22:21:00', spent: '03:00', resolvedAt: '26.07.2026 09:39:00', updatedAt: '26.07.2026 09:39:00', idle: '655:00' },
+    { number: 'C310', createdAt: '26.07.2026 07:30:00', spent: '01:00', resolvedAt: '26.07.2026 09:40:00', updatedAt: '26.07.2026 09:40:00', idle: '129:00' },
+    { number: 'L992', createdAt: '26.07.2026 09:28:00', idle: '31:00' },
+    { number: 'H373', createdAt: '26.07.2026 09:41:00', idle: '20:00' }
+  ];
+
+  var ss = getSpreadsheet_();
+  var sh = ss.getSheetByName(SHEET_TICKETS);
+  if (!sh) throw userError_('Лист «' + SHEET_TICKETS + '» не найден.');
+
+  var stamp = Utilities.formatDate(new Date(), DISPLAY_TZ, 'yyyyMMdd_HHmmss');
+  var backupName = SHEET_TICKETS + '_backup_history_' + stamp;
+  var suffix = 2;
+  while (ss.getSheetByName(backupName)) {
+    backupName = SHEET_TICKETS + '_backup_history_' + stamp + '_' + suffix++;
+  }
+  sh.copyTo(ss).setName(backupName);
+
+  var rowMap = getRowMap_(sh);
+  var updated = [];
+  for (var i = 0; i < repairs.length; i++) {
+    var repair = repairs[i];
+    var rowIdx = rowMap[repair.number];
+    if (!rowIdx) throw userError_('Заявка ' + repair.number + ' не найдена.');
+
+    var row = readTicketRow_(sh, rowIdx);
+    if (String(row[0]) !== repair.number) {
+      throw userError_('Строка заявки ' + repair.number + ' изменилась; восстановление остановлено.');
+    }
+    if (repair.createdAt != null) row[1] = repair.createdAt;
+    if (repair.spent != null) row[12] = repair.spent;
+    if (repair.resolvedAt != null) row[13] = repair.resolvedAt;
+    if (repair.updatedAt != null) row[14] = repair.updatedAt;
+    if (repair.idle != null) row[15] = repair.idle;
+    writeRow_(sh, rowIdx, row);
+    updated.push(repair.number);
+  }
+
+  formatTicketColumns_(sh);
+  SpreadsheetApp.flush();
+  invalidateTicketCache_();
+  invalidateRowMap_();
+  return {
+    backupSheet: backupName,
+    updatedTickets: updated,
+    precision: 'minute',
+    source: 'Google Sheets cell edit history'
+  };
+}
+
 // ============================ ROLES =============================
 
 // Роль по tg_id без побочных эффектов (бэкфилла контактов/подмешивания списка
