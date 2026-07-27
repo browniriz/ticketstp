@@ -295,7 +295,7 @@ function setup() {
   setupRoleTypeAccess_(rs);
   var ts = ensureSheet_(ss, SHEET_TICKETS, TICKETS_HEADERS);
   formatTicketColumns_(ts);
-  migrateTicketDates_(ts); // существующие Date → ISO-строки
+  migrateTicketDates_(ts); // существующие Date/ISO → читаемый локальный текст
   invalidateTicketCache_();
   invalidateRowMap_();
   ensureSheet_(ss, SHEET_REQUESTS, REQUESTS_HEADERS);
@@ -382,19 +382,27 @@ function setupRoleTypeAccess_(sh) {
 
 // Часовой пояс и формат отображения дат в таблице.
 var DISPLAY_TZ = 'Asia/Yekaterinburg'; // UTC+5 (Пермь/Екатеринбург/Челябинск/Магнитогорск)
+var SHEET_DATE_TEXT_FORMAT = 'dd.MM.yyyy HH:mm:ss';
 
-// Все служебные даты и длительности храним как текст. В этой таблице значения
-// Apps Script Date в служебных колонках очищаются при записи; ISO-строки
-// сохраняются стабильно и однозначно разбираются сервером.
+// Служебные даты храним как стабильный читаемый текст в часовом поясе таблицы.
+// API по-прежнему получает ISO через toIso_(), а таймер разбирает текст через
+// parseTicketDate_(). Так Google Sheets не меняет тип ячейки самопроизвольно,
+// но вместо сырого 2026-07-26T05:38:29.319Z видно 26.07.2026 10:38:29.
 function formatTicketColumns_(sh) {
   var rows = sh.getMaxRows();
   var textCols = [2, 12, 13, 14, 15, 16, 17, 18];
   for (var i = 0; i < textCols.length; i++) {
     sh.getRange(1, textCols[i], rows, 1).setNumberFormat('@');
   }
+  var dateCols = [2, 12, 14, 15];
+  for (var d = 0; d < dateCols.length; d++) {
+    sh.setColumnWidth(dateCols[d], 165);
+  }
+  sh.setColumnWidth(13, 115);
+  sh.setColumnWidth(16, 125);
 }
 
-// Разовая миграция: существующие Date → ISO-строки. Запускается из setup().
+// Нормализация старых Date, ISO и "ДД.ММ.ГГГГ ЧЧ:ММ" в единый читаемый текст.
 function migrateTicketDates_(sh) {
   var dateCols = [2, 12, 14, 15];
   var last = sh.getLastRow();
@@ -405,13 +413,116 @@ function migrateTicketDates_(sh) {
     var changed = false;
     for (var i = 0; i < vals.length; i++) {
       var v = vals[i][0];
-      if (v instanceof Date && !isNaN(v.getTime())) {
-        vals[i][0] = v.toISOString();
-        changed = true;
+      if (v !== '' && v != null) {
+        var normalized = formatTicketDate_(v);
+        if (normalized && normalized !== String(v)) {
+          vals[i][0] = normalized;
+          changed = true;
+        } else if (v instanceof Date && normalized) {
+          vals[i][0] = normalized;
+          changed = true;
+        }
       }
     }
     if (changed) rng.setValues(vals);
   }
+}
+
+// Ручной безопасный ремонт исторических строк. Сначала создаёт резервную копию
+// листа, затем нормализует даты и восстанавливает только однозначные значения.
+function repairTicketDataAndFormatting() {
+  var ss = getSpreadsheet_();
+  var sh = ss.getSheetByName(SHEET_TICKETS);
+  if (!sh) throw userError_('Лист «' + SHEET_TICKETS + '» не найден.');
+
+  var stamp = Utilities.formatDate(new Date(), DISPLAY_TZ, 'yyyyMMdd_HHmmss');
+  var backupName = SHEET_TICKETS + '_backup_' + stamp;
+  var suffix = 2;
+  while (ss.getSheetByName(backupName)) {
+    backupName = SHEET_TICKETS + '_backup_' + stamp + '_' + suffix++;
+  }
+  sh.copyTo(ss).setName(backupName);
+
+  var result = repairTicketDataAndFormatting_(sh);
+  result.backupSheet = backupName;
+  return result;
+}
+
+function repairTicketDataAndFormatting_(sh) {
+  var last = sh.getLastRow();
+  var result = {
+    rowsChecked: Math.max(0, last - 1),
+    normalizedDateCells: 0,
+    recoveredResolvedDates: 0,
+    recoveredUpdatedDates: 0,
+    filledSpentDurations: 0,
+    missingCreated: [],
+    missingResolvedForClosed: [],
+    missingUpdated: [],
+    missingIdleForSolved: []
+  };
+  if (last < 2) {
+    formatTicketColumns_(sh);
+    return result;
+  }
+
+  var rows = sh.getRange(2, 1, last - 1, TICKETS_HEADERS.length).getValues();
+  var dateIndexes = [1, 11, 13, 14];
+  var terminal = {};
+  terminal[STATUS.DONE] = true;
+  terminal[STATUS.REJECTED] = true;
+
+  for (var r = 0; r < rows.length; r++) {
+    var row = rows[r];
+    if (!row[0]) continue;
+
+    for (var c = 0; c < dateIndexes.length; c++) {
+      var idx = dateIndexes[c];
+      if (row[idx] === '' || row[idx] == null) continue;
+      var formatted = formatTicketDate_(row[idx]);
+      if (formatted && (row[idx] instanceof Date || formatted !== String(row[idx]))) {
+        row[idx] = formatted;
+        result.normalizedDateCells++;
+      }
+    }
+
+    if (!row[12]) {
+      row[12] = '00:00';
+      result.filledSpentDurations++;
+    }
+
+    // Для закрытой заявки последнее изменение совпадает с моментом закрытия.
+    // Копируем только существующую точную дату, ничего не рассчитываем на глаз.
+    if (terminal[row[7]] && !row[13] && row[14]) {
+      row[13] = row[14];
+      result.recoveredResolvedDates++;
+    }
+    if (!row[14] && row[13]) {
+      row[14] = row[13];
+      result.recoveredUpdatedDates++;
+    }
+
+    if (!row[1]) result.missingCreated.push(String(row[0]));
+    if (terminal[row[7]] && !row[13]) result.missingResolvedForClosed.push(String(row[0]));
+    if (!row[14]) result.missingUpdated.push(String(row[0]));
+    if (row[7] === STATUS.DONE && !row[15]) result.missingIdleForSolved.push(String(row[0]));
+  }
+
+  for (var dc = 0; dc < dateIndexes.length; dc++) {
+    var dateIdx = dateIndexes[dc];
+    sh.getRange(2, dateIdx + 1, rows.length, 1)
+      .setValues(rows.map(function (row) { return [row[dateIdx]]; }));
+  }
+  if (result.filledSpentDurations) {
+    sh.getRange(2, 13, rows.length, 1)
+      .setValues(rows.map(function (row) { return [row[12]]; }));
+  }
+
+  formatTicketColumns_(sh);
+  SpreadsheetApp.flush();
+  invalidateTicketCache_();
+  invalidateRowMap_();
+  return result;
 }
 
 // ============================ ROLES =============================
@@ -597,7 +708,7 @@ function createTicket_(body) {
   assertTicketTypeAllowed_(body.tg_id, body.type);
   var sh = sheet_(SHEET_TICKETS);
   var number = generateNumber_(sh);
-  var now = nowIso_();
+  var now = nowTicketDate_();
   var fileUrl = body.image ? saveFile_(body.image, number, body.filename) : '';
 
   var row = [
@@ -696,11 +807,15 @@ function takeTicket_(body) {
     if (row[7] !== STATUS.NEW && row[7] !== STATUS.FIXED) {
       throw userError_('Заявку нельзя взять в работу в текущем статусе.');
     }
-    var now = nowIso_();
+    var now = nowTicketDate_();
     // «Время не в работе»: от создания до первого взятия (заполняется один раз).
     if (!row[15] && row[1]) {
-      var idleSec = Math.max(0, Math.floor((new Date(now).getTime() - new Date(row[1]).getTime()) / 1000));
-      row[15] = formatMinSec_(idleSec);
+      var createdDate = parseTicketDate_(row[1]);
+      var takenDate = parseTicketDate_(now);
+      if (createdDate && takenDate) {
+        var idleSec = Math.max(0, Math.floor((takenDate.getTime() - createdDate.getTime()) / 1000));
+        row[15] = formatMinSec_(idleSec);
+      }
     }
     row[7] = STATUS.WORK;
     row[9] = String(body.tg_id || '');
@@ -721,7 +836,7 @@ function pauseTicket_(body) {
     row[7] = STATUS.PAUSE;
     row[11] = '';             // таймер остановлен
     row[12] = formatMinSec_(acc);
-    row[14] = nowIso_();
+    row[14] = nowTicketDate_();
     writeRow_(sh, rowIdx, row);
     return { ticket: rowToTicket_(row) };
   });
@@ -732,7 +847,7 @@ function resumeTicket_(body) {
   return withTicket_(body.number, function (sh, rowIdx, row) {
     if (row[7] !== STATUS.PAUSE) throw userError_('Заявку нельзя возобновить.');
     row[7] = STATUS.WORK;
-    row[11] = nowIso_();
+    row[11] = nowTicketDate_();
     row[14] = row[11];
     writeRow_(sh, rowIdx, row);
     notify_('🟡 Заявка ' + row[0] + ' снова в работе');
@@ -748,7 +863,7 @@ function finishTicket_(body) {
       throw userError_('Завершить можно только заявку в работе или на паузе.');
     }
     var acc = parseDuration_(row[12]) + elapsedSinceStart_(row[11]);
-    var now = nowIso_();
+    var now = nowTicketDate_();
     row[7] = STATUS.DONE;
     row[11] = '';
     row[12] = formatMinSec_(acc);
@@ -783,7 +898,7 @@ function returnTicket_(body) {
     row[7] = STATUS.REVISION;
     row[11] = '';                 // таймер остановлен
     row[12] = formatMinSec_(acc); // накопленное сохранено
-    row[14] = nowIso_();
+    row[14] = nowTicketDate_();
     row[17] = reason;
     writeRow_(sh, rowIdx, row);
     notifyBatch_([
@@ -807,7 +922,7 @@ function rejectTicket_(body) {
       throw userError_('Заявка уже закрыта.');
     }
     var acc = parseDuration_(row[12]) + elapsedSinceStart_(row[11]);
-    var now = nowIso_();
+    var now = nowTicketDate_();
     row[7] = STATUS.REJECTED;
     row[9] = String(body.tg_id || row[9] || '');
     row[10] = String(body.name || getRoleRaw_(body.tg_id).name || row[10] || '');
@@ -855,7 +970,7 @@ function resubmitTicket_(body) {
     row[6] = String(body.description).trim();
     if (body.image) row[16] = saveFile_(body.image, row[0], body.filename); // замена вложения по желанию
     row[7] = STATUS.FIXED;
-    row[14] = nowIso_();
+    row[14] = nowTicketDate_();
     writeRow_(sh, rowIdx, row);
     notify_('🔧 Заявка ' + row[0] + ' исправлена и возвращена в работу\nТип: ' + row[2] +
       '\nГород/офис: ' + row[3] + ' / ' + row[4] + '\nОт: ' + row[5]);
@@ -877,7 +992,7 @@ function transferTicket_(body) {
     var fromName = String(body.name || getRoleRaw_(body.tg_id).name || row[10] || '');
     row[9] = toId;
     row[10] = to.name || '';
-    row[14] = nowIso_();
+    row[14] = nowTicketDate_();
     writeRow_(sh, rowIdx, row);
     // Здесь групповое сообщение зависит от результата личного (доставлено ли),
     // поэтому вызовы остаются последовательными — параллелить нечего.
@@ -896,7 +1011,7 @@ function addScreenshot_(body) {
   rateLimit_(body.tg_id, 'file', 60);
   return withTicket_(body.number, function (sh, rowIdx, row) {
     row[16] = saveFile_(body.image, row[0], body.filename);
-    row[14] = nowIso_();
+    row[14] = nowTicketDate_();
     writeRow_(sh, rowIdx, row);
     return { ticket: rowToTicket_(row) };
   });
@@ -1347,7 +1462,7 @@ function normalizeTicketDateCells_(row) {
   var dateIndexes = [1, 11, 13, 14];
   for (var i = 0; i < dateIndexes.length; i++) {
     var idx = dateIndexes[i];
-    if (row[idx] instanceof Date) row[idx] = row[idx].toISOString();
+    if (row[idx] !== '' && row[idx] != null) row[idx] = formatTicketDate_(row[idx]);
   }
   return row;
 }
@@ -1397,15 +1512,39 @@ function rowToTicket_(row) {
   };
 }
 
-function nowIso_() {
-  return new Date().toISOString();
+function nowTicketDate_() {
+  return Utilities.formatDate(new Date(), DISPLAY_TZ, SHEET_DATE_TEXT_FORMAT);
+}
+
+// Date, ISO или локальный текст таблицы → Date.
+function parseTicketDate_(v) {
+  if (v == null || v === '') return null;
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : new Date(v.getTime());
+
+  var s = String(v).trim();
+  var local = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (local) {
+    var pattern = local[6] == null ? 'dd.MM.yyyy HH:mm' : SHEET_DATE_TEXT_FORMAT;
+    try {
+      var parsedLocal = Utilities.parseDate(s, DISPLAY_TZ, pattern);
+      if (!isNaN(parsedLocal.getTime())) return parsedLocal;
+    } catch (e) {}
+  }
+
+  var parsed = new Date(s);
+  return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function formatTicketDate_(v) {
+  var parsed = parseTicketDate_(v);
+  return parsed ? Utilities.formatDate(parsed, DISPLAY_TZ, SHEET_DATE_TEXT_FORMAT) : String(v || '');
 }
 
 // Значение даты из ячейки (Date или строка) → ISO-строка ('' если пусто).
 function toIso_(v) {
   if (v == null || v === '') return '';
-  if (v instanceof Date) return v.toISOString();
-  return String(v);
+  var parsed = parseTicketDate_(v);
+  return parsed ? parsed.toISOString() : String(v);
 }
 
 // Безопасная нормализация для поиска: в таблице часть полей иногда приходит
@@ -1417,20 +1556,8 @@ function searchText_(v) {
 }
 
 function elapsedSinceStart_(startVal) {
-  if (!startVal) return 0;
-  var d;
-  if (startVal instanceof Date) {
-    d = startVal;
-  } else {
-    var s = String(startVal).trim();
-    d = new Date(s); // ISO и большинство стандартных форматов
-    if (isNaN(d.getTime())) {
-      // Локальный формат Google Sheets при TEXT-колонке: "DD.MM.YYYY HH:mm" или "DD.MM.YYYY HH:mm:ss"
-      var m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
-      if (m) d = new Date(+m[3], +m[2] - 1, +m[1], +m[4], +m[5], +(m[6] || 0));
-    }
-  }
-  if (!d || isNaN(d.getTime())) return 0;
+  var d = parseTicketDate_(startVal);
+  if (!d) return 0;
   var diff = (new Date().getTime() - d.getTime()) / 1000;
   // Минимум 1 секунда когда таймер был запущен — Math.floor(0.x) = 0
   return diff > 0 ? Math.max(1, Math.floor(diff)) : 0;

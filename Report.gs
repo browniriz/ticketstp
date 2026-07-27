@@ -113,8 +113,8 @@ function makePeriod_(from, to) {
 function inPeriod_(createdRaw, period) {
   if (!period.from && !period.to) return true;
   if (!createdRaw) return false;
-  var d = (createdRaw instanceof Date) ? createdRaw : new Date(createdRaw);
-  if (isNaN(d.getTime())) return false;
+  var d = parseTicketDate_(createdRaw);
+  if (!d) return false;
   if (period.from && d < period.from) return false;
   if (period.to && d > period.to) return false;
   return true;
