@@ -70,7 +70,8 @@ var SHEET_ROLES = 'роли';
 var SHEET_TICKETS = 'заявки';
 var SHEET_REQUESTS = 'запросы';
 
-var TICKET_TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Перемещение', 'Оприходование', 'Изъятие'];
+var TICKET_TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Перемещение', 'Оприходование', 'Изъятие', 'Списание'];
+var ADMIN_ONLY_TICKET_TYPES = ['Списание'];
 var DEFAULT_EMPLOYEE_TICKET_TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Изъятие'];
 var ROLE_BASE_COLUMNS = 5;
 var ROLE_TYPE_START_COLUMN = ROLE_BASE_COLUMNS + 1;
@@ -371,6 +372,9 @@ function setupRoleTypeAccess_(sh) {
   }
 
   var notes = TICKET_TYPES.map(function (type) {
+    if (ADMIN_ONLY_TICKET_TYPES.indexOf(type) !== -1) {
+      return 'Тип «' + type + '» доступен только администраторам; флажок для сотрудников не применяется.';
+    }
     return 'Флажок включён — сотрудник может создавать заявки типа «' + type + '». Для администраторов ограничения не применяются.';
   });
   sh.getRange(1, ROLE_TYPE_START_COLUMN, 1, typeCount)
@@ -707,7 +711,7 @@ function allowedTicketTypesForRoleRow_(row) {
     });
   }
   return TICKET_TYPES.filter(function (type, index) {
-    return roleTypeCellChecked_(cells[index]);
+    return ADMIN_ONLY_TICKET_TYPES.indexOf(type) === -1 && roleTypeCellChecked_(cells[index]);
   });
 }
 
