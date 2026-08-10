@@ -70,7 +70,7 @@ var SHEET_ROLES = 'роли';
 var SHEET_TICKETS = 'заявки';
 var SHEET_REQUESTS = 'запросы';
 
-var TICKET_TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Перемещение', 'Оприходование', 'Изъятие', 'Списание'];
+var TICKET_TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Перемещение', 'Оприходование', 'Изъятие', 'Списание', 'Возвраты клиентам'];
 var ADMIN_ONLY_TICKET_TYPES = ['Списание'];
 var DEFAULT_EMPLOYEE_TICKET_TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Изъятие'];
 var ROLE_BASE_COLUMNS = 5;

@@ -482,7 +482,7 @@
 <script>
 // ============================ CONFIG ============================
 // Вставь сюда URL веб-приложения Apps Script (Deploy → Web app).
-var API_URL = 'https://script.google.com/macros/s/AKfycbwcdL-QcaNG0nRZPBLKGQKaBSeOVFvQ-a2guWEy9SO9hxM7dfuFG30pDBow9Kqjv9_ZfQ/exec';
+var API_URL = 'https://script.google.com/macros/s/AKfycbyPEzZ_p07LgivkErPKjuzB_6XnQtcF-Mr2lBqwK-cw_b_XC9AypfuhAGpQpHCxU2AO3g/exec';
 
 // ============================ DATA ============================
 var OFFICES = {
@@ -540,13 +540,13 @@ var lastDetailSig = '';        // сигнатура состояния заяв
 var GUEST_PENDING = false;     // гость уже отправил запрос на доступ
 var ALLOWED_TYPES = null;      // список приходит с сервера из флажков листа «роли»
 
-var TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Перемещение', 'Оприходование', 'Изъятие', 'Списание'];
+var TYPES = ['Ломбард', 'Скупка', 'Касса', 'Ошибка', 'Перемещение', 'Оприходование', 'Изъятие', 'Списание', 'Возвраты клиентам'];
 var ADMIN_ONLY_TYPES = ['Списание'];
 function allTypes() {
   if (ROLE === 'админ') return TYPES.slice();
   if (!Array.isArray(ALLOWED_TYPES)) {
     return TYPES.filter(function (t) {
-      return t !== 'Перемещение' && t !== 'Оприходование' && ADMIN_ONLY_TYPES.indexOf(t) === -1;
+      return t !== 'Перемещение' && t !== 'Оприходование' && t !== 'Возвраты клиентам' && ADMIN_ONLY_TYPES.indexOf(t) === -1;
     });
   }
   return TYPES.filter(function (t) {
