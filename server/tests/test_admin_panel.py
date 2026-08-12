@@ -11,8 +11,9 @@ from sqlalchemy import select
 
 from ticketsbot.app import create_app
 from ticketsbot.config import Settings
-from ticketsbot.models import (AdminAudit, AdminSession, Attachment, NotificationOutbox,
-                               SheetSyncOutbox, Ticket, TicketEvent, TicketTombstone, utcnow)
+from ticketsbot.models import (AdminAudit, AdminSession, Attachment, BridgeSequence,
+                               NotificationOutbox, SheetSyncOutbox, Ticket, TicketEvent,
+                               TicketTombstone, utcnow)
 from ticketsbot.workers import WorkerManager
 
 
@@ -223,6 +224,41 @@ async def test_archive_and_safe_delete_are_audited_and_transactional(admin_app):
         assert attachment.ticket_id is None and attachment.quarantined_at is not None
         actions = list((await session.execute(select(AdminAudit.action))).scalars())
         assert actions == ["archive_ticket", "delete_ticket"]
+
+
+@pytest.mark.asyncio
+async def test_delete_sequence_is_newer_than_imported_ticket_version(admin_app):
+    ticket_id = await seed_ticket(admin_app)
+    async with admin_app.state.db.session() as session:
+        ticket = await session.get(Ticket, ticket_id)
+        ticket.version = 5
+        await session.commit()
+    with TestClient(admin_app, base_url="https://testserver") as client:
+        csrf = login(client).json()["csrf_token"]
+        response = client.request("DELETE", "/admin/api/tickets/A001",
+                                  json={"confirm_number": "A001"}, headers=csrf_headers(csrf))
+        assert response.status_code == 200
+    async with admin_app.state.db.session() as session:
+        tombstone = (await session.execute(select(TicketTombstone))).scalar_one()
+        outbox = (await session.execute(select(SheetSyncOutbox))).scalar_one()
+        assert tombstone.sequence == 6
+        assert json.loads(outbox.payload_json)["sequence"] == 6
+
+
+@pytest.mark.asyncio
+async def test_delete_sequence_continues_higher_local_counter(admin_app):
+    ticket_id = await seed_ticket(admin_app)
+    async with admin_app.state.db.session() as session:
+        session.add(BridgeSequence(entity_key="ticket:A001", version=12))
+        await session.commit()
+    with TestClient(admin_app, base_url="https://testserver") as client:
+        csrf = login(client).json()["csrf_token"]
+        response = client.request("DELETE", "/admin/api/tickets/A001",
+                                  json={"confirm_number": "A001"}, headers=csrf_headers(csrf))
+        assert response.status_code == 200
+    async with admin_app.state.db.session() as session:
+        tombstone = (await session.execute(select(TicketTombstone))).scalar_one()
+        assert tombstone.sequence == 13
 
 
 @pytest.mark.asyncio

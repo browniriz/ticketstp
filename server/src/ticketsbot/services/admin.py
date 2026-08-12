@@ -5,7 +5,7 @@ from dataclasses import asdict
 from datetime import timedelta
 
 from fastapi import HTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.sqlite import insert
 
 from ..models import (AdminAudit, Attachment, BridgeSequence, NotificationOutbox,
@@ -49,8 +49,14 @@ async def delete_ticket(session, number: str, confirmation: str, session_id: str
         raise HTTPException(409, "Only resolved or rejected tickets can be deleted")
 
     now = utcnow()
-    stmt = insert(BridgeSequence).values(entity_key="ticket:" + number, version=1).on_conflict_do_update(
-        index_elements=[BridgeSequence.entity_key], set_={"version": BridgeSequence.version + 1},
+    # Imported tickets already have a legacy version known by Apps Script. The
+    # delete must be newer than both that version and our durable local counter.
+    minimum_sequence = int(ticket.version or 0) + 1
+    stmt = insert(BridgeSequence).values(
+        entity_key="ticket:" + number, version=minimum_sequence,
+    ).on_conflict_do_update(
+        index_elements=[BridgeSequence.entity_key],
+        set_={"version": func.max(BridgeSequence.version + 1, minimum_sequence)},
     ).returning(BridgeSequence.version)
     sequence = int((await session.execute(stmt)).scalar_one())
     tombstone = TicketTombstone(number=number, ticket_id=ticket.id,
