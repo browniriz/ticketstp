@@ -125,7 +125,12 @@ var STATUS = {
 // читают только свою половину, а не всю историю заявок — иначе по мере роста
 // листа общий кэш упирается в лимит CacheService (100 КБ на значение) и
 // опрос (каждые 4с) начинает бить по таблице напрямую на КАЖДЫЙ запрос.
-var CACHE_TTL_SECONDS = 20;
+// Все записи через приложение явно сбрасывают кэш. Длинный TTL нужен, чтобы
+// большая таблица не перечитывалась каждые 20 секунд при обычном просмотре.
+var CACHE_TTL_SECONDS = 300;
+// Лимит CacheService считается в байтах; 20 тыс. UTF-16 символов безопасны
+// даже для четырёхбайтового Unicode и остаются ниже 100 КБ на ключ.
+var CACHE_CHUNK_SIZE = 20000;
 var CACHE_KEY_TICKETS_ACTIVE = 'ticket_rows_active_v2';
 var CACHE_KEY_TICKETS_DONE = 'ticket_rows_done_v2';
 var CACHE_KEY_ROLES = 'role_rows_v2';
@@ -795,7 +800,7 @@ function createTicket_(body) {
   // Пишем сразу после последней строки С НОМЕРОМ (столбец A), а не после
   // getLastRow() — иначе посторонний контент в дальних ячейках уводит запись вниз.
   sh.getRange(nextTicketRow_(sh), 1, 1, row.length).setValues([row]);
-  invalidateTicketCache_();
+  updateTicketCachesAfterWrite_(row);
   invalidateRowMap_();
 
   notify_('🔴 Новая заявка ' + number +
@@ -1321,14 +1326,19 @@ function removeRole_(tgId) {
   CacheService.getScriptCache().remove(CACHE_KEY_ROLES);
 }
 
-// Ручные изменения флажков в Google Таблице сразу сбрасывают кэш ролей.
+// Ручные изменения в Google Таблице сразу сбрасывают соответствующий кэш.
 function onEdit(e) {
   try {
-    if (e && e.range && e.range.getSheet().getName() === SHEET_ROLES) {
+    if (!e || !e.range) return;
+    var sheetName = e.range.getSheet().getName();
+    if (sheetName === SHEET_ROLES) {
       CacheService.getScriptCache().remove(CACHE_KEY_ROLES);
+    } else if (sheetName === SHEET_TICKETS) {
+      invalidateTicketCache_();
+      invalidateRowMap_();
     }
   } catch (err) {
-    Logger.log('onEdit roles cache: ' + err);
+    Logger.log('onEdit cache: ' + err);
   }
 }
 
@@ -1416,17 +1426,52 @@ function readTicketDataRows_() {
 // Только активные (не решена/отклонена) — использует getTickets_.
 function readActiveTicketRows_() {
   var cache = CacheService.getScriptCache();
-  var cached = cache.get(CACHE_KEY_TICKETS_ACTIVE);
-  if (cached) { try { return JSON.parse(cached); } catch (e) {} }
+  var cached = getChunkedJsonCache_(cache, CACHE_KEY_TICKETS_ACTIVE);
+  if (cached) return cached;
   return splitAndCacheTicketRows_().active;
 }
 
 // Только завершённые (решена/отклонена) — использует getHistory_.
 function readDoneTicketRows_() {
   var cache = CacheService.getScriptCache();
-  var cached = cache.get(CACHE_KEY_TICKETS_DONE);
-  if (cached) { try { return JSON.parse(cached); } catch (e) {} }
+  var cached = getChunkedJsonCache_(cache, CACHE_KEY_TICKETS_DONE);
+  if (cached) return cached;
   return splitAndCacheTicketRows_().done;
+}
+
+// CacheService ограничивает одно значение 100 КБ. История быстро перерастает
+// этот лимит, поэтому сохраняем JSON частями и собираем при чтении.
+function getChunkedJsonCache_(cache, key) {
+  var direct = cache.get(key);
+  if (direct) { try { return JSON.parse(direct); } catch (e) {} }
+  var count = Number(cache.get(key + '_chunks') || 0);
+  if (!count) return null;
+  var keys = [];
+  for (var i = 0; i < count; i++) keys.push(key + '_chunk_' + i);
+  var parts = cache.getAll(keys);
+  var json = '';
+  for (var j = 0; j < keys.length; j++) {
+    if (!parts[keys[j]]) return null;
+    json += parts[keys[j]];
+  }
+  try { return JSON.parse(json); } catch (e2) { return null; }
+}
+
+function putChunkedJsonCache_(cache, key, value) {
+  var json = JSON.stringify(value);
+  if (json.length < 95000) {
+    cache.put(key, json, CACHE_TTL_SECONDS);
+    cache.remove(key + '_chunks');
+    return;
+  }
+  var count = Math.ceil(json.length / CACHE_CHUNK_SIZE);
+  var parts = {};
+  for (var i = 0; i < count; i++) {
+    parts[key + '_chunk_' + i] = json.slice(i * CACHE_CHUNK_SIZE, (i + 1) * CACHE_CHUNK_SIZE);
+  }
+  cache.putAll(parts, CACHE_TTL_SECONDS);
+  cache.put(key + '_chunks', String(count), CACHE_TTL_SECONDS);
+  cache.remove(key);
 }
 
 // Один проход по листу (при промахе обоих кэшей), делит строки на активные и
@@ -1442,21 +1487,56 @@ function splitAndCacheTicketRows_() {
     else active.push(rows[i]);
   }
   var cache = CacheService.getScriptCache();
-  var aJson = JSON.stringify(active);
-  var dJson = JSON.stringify(done);
-  // CacheService ограничивает значение 100 КБ — крупные объёмы не кэшируем
-  // (тогда просто читаем таблицу напрямую на следующий раз).
-  if (aJson.length < 95000) cache.put(CACHE_KEY_TICKETS_ACTIVE, aJson, CACHE_TTL_SECONDS);
-  if (dJson.length < 95000) cache.put(CACHE_KEY_TICKETS_DONE, dJson, CACHE_TTL_SECONDS);
+  putChunkedJsonCache_(cache, CACHE_KEY_TICKETS_ACTIVE, active);
+  putChunkedJsonCache_(cache, CACHE_KEY_TICKETS_DONE, done);
   return { active: active, done: done };
 }
 
 function invalidateTicketCache_() {
   var cache = CacheService.getScriptCache();
-  cache.remove(CACHE_KEY_TICKETS_ACTIVE);
-  cache.remove(CACHE_KEY_TICKETS_DONE);
+  removeChunkedJsonCache_(cache, CACHE_KEY_TICKETS_ACTIVE);
+  removeChunkedJsonCache_(cache, CACHE_KEY_TICKETS_DONE);
   cache.remove(CACHE_KEY_LEADERBOARD_ALL);
   cache.remove(CACHE_KEY_LEADERBOARD_MONTH);
+}
+
+// Обычное действие над заявкой не должно заставлять следующего пользователя
+// снова читать весь лист. Если оба списка уже прогреты, точечно переносим/
+// обновляем одну строку в кэше. При холодном кэше оставляем прежнее поведение.
+function updateTicketCachesAfterWrite_(row) {
+  var cache = CacheService.getScriptCache();
+  var active = getChunkedJsonCache_(cache, CACHE_KEY_TICKETS_ACTIVE);
+  cache.remove(CACHE_KEY_LEADERBOARD_ALL);
+  cache.remove(CACHE_KEY_LEADERBOARD_MONTH);
+  if (active === null) {
+    removeChunkedJsonCache_(cache, CACHE_KEY_TICKETS_ACTIVE);
+    removeChunkedJsonCache_(cache, CACHE_KEY_TICKETS_DONE);
+    return;
+  }
+  var number = String(row[0]);
+  active = active.filter(function (r) { return String(r[0]) !== number; });
+  if (row[7] !== STATUS.DONE && row[7] !== STATUS.REJECTED) {
+    active.push(row);
+    putChunkedJsonCache_(cache, CACHE_KEY_TICKETS_ACTIVE, active);
+    return;
+  }
+  var done = getChunkedJsonCache_(cache, CACHE_KEY_TICKETS_DONE);
+  if (done === null) {
+    removeChunkedJsonCache_(cache, CACHE_KEY_TICKETS_ACTIVE);
+    removeChunkedJsonCache_(cache, CACHE_KEY_TICKETS_DONE);
+    return;
+  }
+  done = done.filter(function (r) { return String(r[0]) !== number; });
+  done.push(row);
+  putChunkedJsonCache_(cache, CACHE_KEY_TICKETS_ACTIVE, active);
+  putChunkedJsonCache_(cache, CACHE_KEY_TICKETS_DONE, done);
+}
+
+function removeChunkedJsonCache_(cache, key) {
+  var count = Number(cache.get(key + '_chunks') || 0);
+  var keys = [key, key + '_chunks'];
+  for (var i = 0; i < count; i++) keys.push(key + '_chunk_' + i);
+  cache.removeAll(keys);
 }
 
 // ============================ ROW INDEX CACHE (заявки) ============================
@@ -1533,7 +1613,7 @@ function normalizeTicketDateCells_(row) {
 function writeRow_(sh, rowIdx, row) {
   normalizeTicketDateCells_(row);
   sh.getRange(rowIdx, 1, 1, TICKETS_HEADERS.length).setValues([row]);
-  invalidateTicketCache_();
+  updateTicketCachesAfterWrite_(row);
 }
 
 // Номер строки для новой заявки: сразу после последней строки С НОМЕРОМ (столбец A),

@@ -576,45 +576,75 @@ function api(action, payload) {
   if (!API_URL) return Promise.reject(new Error('API_URL не задан в index.html'));
   var isLongRead = action === 'getTickets' || action === 'getMyTickets' ||
     action === 'getHistory' || action === 'getAccess' || action === 'getLeaderboard';
+  var isSafeRead = isLongRead || action === 'getRole' || action === 'getAdmins';
   var timeoutMs = payload.image ? API_UPLOAD_TIMEOUT_MS :
     (isLongRead ? API_READ_TIMEOUT_MS : API_TIMEOUT_MS);
   return new Promise(function (resolve, reject) {
     var settled = false;
-    var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    var timer = setTimeout(function () {
-      if (controller) { try { controller.abort(); } catch (e) {} }
-      finish(reject, new Error('Сервер не ответил за ' + Math.round(timeoutMs / 1000) +
-        ' секунд. Проверьте связь и повторите.'));
-    }, timeoutMs);
+    var attemptNo = 0;
+    var maxAttempts = isSafeRead ? 2 : 1;
 
     function finish(fn, value) {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       fn(value);
     }
 
-    var options = { method: 'POST', body: JSON.stringify(payload) };
-    if (controller) options.signal = controller.signal;
-    fetch(API_URL, options)
-      .then(function (r) {
-        if (!r.ok) throw new Error('Сервер вернул HTTP ' + r.status + '.');
-        return r.text();
-      })
-      .then(function (text) {
-        var res;
-        try { res = JSON.parse(text); }
-        catch (e) { throw new Error('Сервер вернул некорректный ответ.'); }
-        if (!res || typeof res !== 'object') throw new Error('Сервер вернул пустой ответ.');
-        if (!res.success) throw new Error(res.error || 'Ошибка сервера');
-        if (res.data == null) throw new Error('Сервер не вернул данные.');
-        finish(resolve, res.data);
-      })
-      .catch(function (e) {
-        if (settled) return;
-        var msg = e && e.message ? e.message : 'Нет связи с сервером.';
+    function runAttempt() {
+      attemptNo++;
+      var timedOut = false;
+      var attemptFinished = false;
+      var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      var timer;
+
+      function failAttempt(e) {
+        if (attemptFinished || settled) return;
+        attemptFinished = true;
+        clearTimeout(timer);
+        var retryable = isSafeRead && (timedOut || e.retryable || e.name === 'TypeError');
+        if (retryable && attemptNo < maxAttempts) {
+          setTimeout(runAttempt, 800);
+          return;
+        }
+        var msg = timedOut ? 'Сервер не ответил за ' + Math.round(timeoutMs / 1000) +
+          ' секунд. Проверьте связь и повторите.' :
+          (e && e.message ? e.message : 'Нет связи с сервером.');
         finish(reject, new Error(msg));
-      });
+      }
+
+      timer = setTimeout(function () {
+        timedOut = true;
+        if (controller) { try { controller.abort(); } catch (e) {} }
+        failAttempt(new Error('Таймаут запроса.'));
+      }, timeoutMs);
+      var options = { method: 'POST', body: JSON.stringify(payload) };
+      if (controller) options.signal = controller.signal;
+      fetch(API_URL, options)
+        .then(function (r) {
+          if (!r.ok) {
+            var err = new Error('Сервер вернул HTTP ' + r.status + '.');
+            err.retryable = r.status === 404 || r.status === 429 || r.status >= 500;
+            throw err;
+          }
+          return r.text();
+        })
+        .then(function (text) {
+          if (attemptFinished || settled) return;
+          clearTimeout(timer);
+          var res;
+          try { res = JSON.parse(text); }
+          catch (e) { throw new Error('Сервер вернул некорректный ответ.'); }
+          if (!res || typeof res !== 'object') throw new Error('Сервер вернул пустой ответ.');
+          if (!res.success) throw new Error(res.error || 'Ошибка сервера');
+          if (res.data == null) throw new Error('Сервер не вернул данные.');
+          attemptFinished = true;
+          finish(resolve, res.data);
+        })
+        .catch(function (e) {
+          failAttempt(e);
+        });
+    }
+    runAttempt();
   });
 }
 
@@ -799,13 +829,17 @@ function switchView(view, preloadedTickets) {
   for (var j = 0; j < tabs.length; j++) tabs[j].classList.toggle('active', tabs[j].dataset.view === view);
 
   stopPolling();
-  if (view === 'mine')    { refreshMine(); startPolling(refreshMine); }
+  if (view === 'mine')    {
+    var mineInitial = refreshMine();
+    startPolling(refreshMine, mineInitial);
+  }
   if (view === 'admin')   {
     // preloadedTickets приходит только на самом первом открытии (из getRole) —
     // рисуем сразу, без лишнего круглого запроса; дальше обычный опрос.
+    var adminInitial = null;
     if (preloadedTickets) renderList('adminList', preloadedTickets, true);
-    else refreshAdmin();
-    startPolling(refreshAdmin);
+    else adminInitial = refreshAdmin();
+    startPolling(refreshAdmin, adminInitial);
   }
   if (view === 'history') {
     historyPage = 1; historyQuery = '';
@@ -815,24 +849,24 @@ function switchView(view, preloadedTickets) {
   if (view === 'access')  {
     accessPage = 1; accessQuery = '';
     var as = document.getElementById('accessSearch'); if (as) as.value = '';
-    refreshAccess();
-    startPolling(refreshAccess);
+    var accessInitial = refreshAccess();
+    startPolling(refreshAccess, accessInitial);
   }
   if (view === 'leaderboard') {
     lbOpenId = '';
-    refreshLeaderboard();
-    startPolling(refreshLeaderboard); // виден в реальном времени, пока экран открыт
+    var leaderboardInitial = refreshLeaderboard();
+    startPolling(refreshLeaderboard, leaderboardInitial); // виден в реальном времени, пока экран открыт
   }
 }
 
 // Следующий опрос начинается только после завершения предыдущего. Это не даёт
 // медленным Apps Script-запросам накапливаться и приходить в неверном порядке.
-function startPolling(fn) {
+function startPolling(fn, initialRequest) {
   stopPolling();
   var generation = pollGeneration;
   function schedule() {
     if (generation !== pollGeneration) return;
-    pollTimer = setTimeout(run, 4000);
+    pollTimer = setTimeout(run, 10000);
   }
   function run() {
     if (generation !== pollGeneration) return;
@@ -841,7 +875,11 @@ function startPolling(fn) {
     catch (e) { schedule(); return; }
     Promise.resolve(result).then(schedule, schedule);
   }
-  schedule();
+  if (initialRequest && typeof initialRequest.then === 'function') {
+    Promise.resolve(initialRequest).then(schedule, schedule);
+  } else {
+    schedule();
+  }
 }
 function stopPolling() {
   pollGeneration++;
@@ -1006,11 +1044,15 @@ function submitTicket(e) {
 
 // ============================ LISTS ============================
 function refreshMine() {
-  return api('getMyTickets', {}).then(function (d) { renderList('mineList', d && d.tickets, false); })
+  return api('getMyTickets', {}).then(function (d) {
+    if (currentView === 'mine') renderList('mineList', d && d.tickets, false);
+  })
     .catch(function (e) { listError('mineList', e); });
 }
 function refreshAdmin() {
-  return api('getTickets', {}).then(function (d) { renderList('adminList', d && d.tickets, true); })
+  return api('getTickets', {}).then(function (d) {
+    if (currentView === 'admin') renderList('adminList', d && d.tickets, true);
+  })
     .catch(function (e) { listError('adminList', e); });
 }
 var historyPage = 1;   // текущая страница истории (сбрасывается при входе на вкладку)
@@ -1020,6 +1062,7 @@ var historySearchDebounce = null;
 function refreshHistory() {
   return api('getHistory', { page: historyPage, q: historyQuery }).then(function (d) {
     if (!d || !Array.isArray(d.tickets)) throw new Error('Сервер не вернул список истории.');
+    if (currentView !== 'history') return;
     historyPage = d.page || 1;
     renderList('historyList', d.tickets, true);
     renderHistoryPager(d.page, d.totalPages, d.total);
@@ -1066,6 +1109,7 @@ function refreshAccess() {
     if (!d || !Array.isArray(d.requests) || !Array.isArray(d.employees)) {
       throw new Error('Сервер не вернул список доступов.');
     }
+    if (currentView !== 'access') return;
     accessPage = d.page || 1;
     lastAccPage = d.page || 1;
     lastAccTotalPages = d.totalPages || 1;
@@ -1314,6 +1358,7 @@ function setLbPeriod(period) {
 function refreshLeaderboard() {
   return api('getLeaderboard', { period: lbPeriod }).then(function (d) {
     if (!d || !Array.isArray(d.leaders)) throw new Error('Сервер не вернул данные рейтинга.');
+    if (currentView !== 'leaderboard') return;
     lastLeaders = d.leaders;
     renderLeaderboard(lastLeaders);
   }).catch(function (e) { listError('lbList', e); });
