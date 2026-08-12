@@ -637,7 +637,9 @@ function getRole_(body) {
         allowedTypes: allowedTicketTypesForRoleRow_(rows[i])
       };
       if (role === 'админ') {
-        try { result.tickets = getTickets_(body).tickets; } catch (e) { Logger.log('getRole tickets: ' + e); }
+        // Не скрываем ошибку загрузки заявок: иначе клиент получает роль админа
+        // без массива tickets и падает на отрисовке с неясной ошибкой forEach.
+        result.tickets = getTickets_(body).tickets;
       }
       return result;
     }

@@ -483,6 +483,8 @@
 // ============================ CONFIG ============================
 // Вставь сюда URL веб-приложения Apps Script (Deploy → Web app).
 var API_URL = 'https://script.google.com/macros/s/AKfycbyPEzZ_p07LgivkErPKjuzB_6XnQtcF-Mr2lBqwK-cw_b_XC9AypfuhAGpQpHCxU2AO3g/exec';
+var API_TIMEOUT_MS = 30000;
+var API_UPLOAD_TIMEOUT_MS = 90000;
 
 // ============================ DATA ============================
 var OFFICES = {
@@ -525,6 +527,7 @@ function readUser() {
 
 var currentView = '';
 var pollTimer = null;
+var pollGeneration = 0;
 var tickTimer = null;
 var ticketCache = {};          // number -> ticket
 var cacheFetchedAt = 0;        // performance.now() of last fetch
@@ -570,12 +573,45 @@ function api(action, payload) {
   payload.tg_id = TG_ID; // подсказка для UI; сервер доверяет только подписанному init_data
   payload.init_data = (tg && tg.initData) || '';
   if (!API_URL) return Promise.reject(new Error('API_URL не задан в index.html'));
-  return fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) })
-    .then(function (r) { return r.json(); })
-    .then(function (res) {
-      if (!res.success) throw new Error(res.error || 'Ошибка сервера');
-      return res.data;
-    });
+  var timeoutMs = payload.image ? API_UPLOAD_TIMEOUT_MS : API_TIMEOUT_MS;
+  return new Promise(function (resolve, reject) {
+    var settled = false;
+    var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var timer = setTimeout(function () {
+      if (controller) { try { controller.abort(); } catch (e) {} }
+      finish(reject, new Error('Сервер не ответил за ' + Math.round(timeoutMs / 1000) +
+        ' секунд. Проверьте связь и повторите.'));
+    }, timeoutMs);
+
+    function finish(fn, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    }
+
+    var options = { method: 'POST', body: JSON.stringify(payload) };
+    if (controller) options.signal = controller.signal;
+    fetch(API_URL, options)
+      .then(function (r) {
+        if (!r.ok) throw new Error('Сервер вернул HTTP ' + r.status + '.');
+        return r.text();
+      })
+      .then(function (text) {
+        var res;
+        try { res = JSON.parse(text); }
+        catch (e) { throw new Error('Сервер вернул некорректный ответ.'); }
+        if (!res || typeof res !== 'object') throw new Error('Сервер вернул пустой ответ.');
+        if (!res.success) throw new Error(res.error || 'Ошибка сервера');
+        if (res.data == null) throw new Error('Сервер не вернул данные.');
+        finish(resolve, res.data);
+      })
+      .catch(function (e) {
+        if (settled) return;
+        var msg = e && e.message ? e.message : 'Нет связи с сервером.';
+        finish(reject, new Error(msg));
+      });
+  });
 }
 
 // ============================ THEME ============================
@@ -633,9 +669,15 @@ function waitForTelegram(attempt) {
 }
 
 function loadRole() {
-  api('getRole', {})
+  return api('getRole', {})
     .then(function (data) {
-      ROLE = data.role || 'гость';
+      if (!data || ['админ', 'сотрудник', 'гость'].indexOf(data.role) === -1) {
+        throw new Error('Сервер не вернул корректную роль пользователя.');
+      }
+      if (data.role === 'админ' && !Array.isArray(data.tickets)) {
+        throw new Error('Сервер не вернул список заявок администратора.');
+      }
+      ROLE = data.role;
       ALLOWED_TYPES = Array.isArray(data.allowedTypes) ? data.allowedTypes : null;
       GUEST_PENDING = !!data.pending;
       if (data.name) USER_NAME = data.name;
@@ -644,11 +686,26 @@ function loadRole() {
       buildUI(data.tickets);
     })
     .catch(function (e) {
-      ROLE = 'гость';   // при ошибке доступ не выдаём
-      ALLOWED_TYPES = null;
-      buildUI();
-      if (API_URL) toast(e.message, true);
+      // Сбой проверки роли не означает отсутствие доступа. Показываем отдельный
+      // экран с повтором, не предлагая администратору заново запрашивать доступ.
+      renderRoleLoadError(e);
     });
+}
+
+function renderRoleLoadError(e) {
+  stopPolling();
+  document.getElementById('appTitle').textContent = 'Не удалось загрузить бота';
+  document.getElementById('tabs').innerHTML = '';
+  var lbBtn = document.getElementById('lbBtn'); if (lbBtn) lbBtn.style.display = 'none';
+  var chip = document.getElementById('roleChip');
+  chip.innerHTML = '<span style="color:var(--amber)">Доступ не проверен</span>' +
+    (TG_ID ? ' · id ' + esc(TG_ID) : '');
+  var g = document.getElementById('guestBody');
+  g.innerHTML = '<div class="empty"><span class="icon">⚠️</span>' +
+    esc(e && e.message ? e.message : 'Нет связи с сервером.') +
+    '<br>Ваши права доступа не изменялись.</div>' +
+    '<button class="submit" onclick="loadRole()">Повторить</button>';
+  showOnly('guest');
 }
 
 function buildUI(initialTickets) {
@@ -767,8 +824,28 @@ function switchView(view, preloadedTickets) {
   }
 }
 
-function startPolling(fn) { stopPolling(); pollTimer = setInterval(fn, 4000); }
-function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+// Следующий опрос начинается только после завершения предыдущего. Это не даёт
+// медленным Apps Script-запросам накапливаться и приходить в неверном порядке.
+function startPolling(fn) {
+  stopPolling();
+  var generation = pollGeneration;
+  function schedule() {
+    if (generation !== pollGeneration) return;
+    pollTimer = setTimeout(run, 4000);
+  }
+  function run() {
+    if (generation !== pollGeneration) return;
+    var result;
+    try { result = fn(); }
+    catch (e) { schedule(); return; }
+    Promise.resolve(result).then(schedule, schedule);
+  }
+  schedule();
+}
+function stopPolling() {
+  pollGeneration++;
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+}
 
 // ============================ FORM ============================
 function initForm() {
@@ -928,11 +1005,11 @@ function submitTicket(e) {
 
 // ============================ LISTS ============================
 function refreshMine() {
-  api('getMyTickets', {}).then(function (d) { renderList('mineList', d.tickets, false); })
+  return api('getMyTickets', {}).then(function (d) { renderList('mineList', d && d.tickets, false); })
     .catch(function (e) { listError('mineList', e); });
 }
 function refreshAdmin() {
-  api('getTickets', {}).then(function (d) { renderList('adminList', d.tickets, true); })
+  return api('getTickets', {}).then(function (d) { renderList('adminList', d && d.tickets, true); })
     .catch(function (e) { listError('adminList', e); });
 }
 var historyPage = 1;   // текущая страница истории (сбрасывается при входе на вкладку)
@@ -940,7 +1017,8 @@ var historyQuery = ''; // текущий поисковый запрос
 var historySearchDebounce = null;
 
 function refreshHistory() {
-  api('getHistory', { page: historyPage, q: historyQuery }).then(function (d) {
+  return api('getHistory', { page: historyPage, q: historyQuery }).then(function (d) {
+    if (!d || !Array.isArray(d.tickets)) throw new Error('Сервер не вернул список истории.');
     historyPage = d.page || 1;
     renderList('historyList', d.tickets, true);
     renderHistoryPager(d.page, d.totalPages, d.total);
@@ -983,12 +1061,15 @@ var lastAccPage = 1, lastAccTotalPages = 1, lastAccTotal = 0; // метадан�
 
 function refreshAccess() {
   renamingId = ''; // свежая загрузка/повторный вход — сбрасываем режим правки
-  api('getAccess', { page: accessPage, q: accessQuery }).then(function (d) {
+  return api('getAccess', { page: accessPage, q: accessQuery }).then(function (d) {
+    if (!d || !Array.isArray(d.requests) || !Array.isArray(d.employees)) {
+      throw new Error('Сервер не вернул список доступов.');
+    }
     accessPage = d.page || 1;
     lastAccPage = d.page || 1;
     lastAccTotalPages = d.totalPages || 1;
     lastAccTotal = d.total || 0;
-    renderAccess(d.requests || [], d.employees || []);
+    renderAccess(d.requests, d.employees);
     renderAccessPager(lastAccPage, lastAccTotalPages, lastAccTotal);
   }).catch(function (e) {
     document.getElementById('accessBody').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
@@ -1144,11 +1225,21 @@ function listError(id, e) {
 }
 
 function renderList(containerId, tickets, isAdmin) {
+  if (!Array.isArray(tickets)) {
+    throw new Error('Сервер не вернул список заявок. Повторите загрузку.');
+  }
   cacheFetchedAt = performance.now();
   tickets.forEach(function (t) { ticketCache[t.number] = t; });
   viewTickets = tickets;
   viewContainerId = containerId;
   paintList(containerId, tickets);
+  if (containerId === 'adminList' && openTicketNo) {
+    var stillActive = false;
+    for (var i = 0; i < tickets.length; i++) {
+      if (tickets[i].number === openTicketNo) { stillActive = true; break; }
+    }
+    if (!stillActive) closeDetail();
+  }
   // Перерисовываем открытую карточку только если её состояние реально изменилось,
   // иначе опрос каждые 4с стирал бы открытую панель передачи/прикрепления.
   if (openTicketNo && ticketCache[openTicketNo]) {
@@ -1220,8 +1311,9 @@ function setLbPeriod(period) {
 }
 
 function refreshLeaderboard() {
-  api('getLeaderboard', { period: lbPeriod }).then(function (d) {
-    lastLeaders = d.leaders || [];
+  return api('getLeaderboard', { period: lbPeriod }).then(function (d) {
+    if (!d || !Array.isArray(d.leaders)) throw new Error('Сервер не вернул данные рейтинга.');
+    lastLeaders = d.leaders;
     renderLeaderboard(lastLeaders);
   }).catch(function (e) { listError('lbList', e); });
 }
@@ -1675,10 +1767,11 @@ function liveElapsed(t) {
 
 function tickTimers() {
   var els = document.querySelectorAll('[data-timer]');
-  els.forEach(function (el) {
+  for (var i = 0; i < els.length; i++) {
+    var el = els[i];
     var t = ticketCache[el.getAttribute('data-timer')];
     if (t) el.textContent = fmt(liveElapsed(t));
-  });
+  }
   var d = document.querySelector('[data-detail-timer]');
   if (d) {
     var dt = ticketCache[d.getAttribute('data-detail-timer')];
