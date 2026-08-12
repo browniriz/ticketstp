@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     sheet_bridge_url: str = ""
     sheet_bridge_secret: str = ""
     roles_pull_seconds: float = 300.0
+    admin_password_hash: str = ""
+    admin_session_secret: str = ""
+    admin_session_ttl_seconds: int = 8 * 60 * 60
+    admin_login_max_attempts: int = 5
+    admin_login_window_seconds: int = 15 * 60
+    admin_media_retention_days: int = 30
+    admin_allowed_origin: str = ""
 
     @property
     def allowed_origins(self) -> list[str]:
@@ -52,6 +59,18 @@ class Settings(BaseSettings):
             raise ValueError("public_base_url must be an absolute HTTP(S) URL")
         if parsed.scheme != "https" and parsed.hostname not in local_hosts and not is_test_host:
             raise ValueError("public_base_url must use HTTPS outside localhost/test")
+
+    def validate_admin_configuration(self) -> None:
+        """Fail closed before serving an externally reachable admin login."""
+        configured = bool(self.admin_password_hash or self.admin_session_secret)
+        if not configured:
+            return
+        if not self.admin_password_hash or not self.admin_session_secret:
+            raise ValueError("admin_password_hash and admin_session_secret must be configured together")
+        parsed = urlparse(self.admin_allowed_origin.strip())
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                or parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment):
+            raise ValueError("admin_allowed_origin is required and must be an HTTPS origin")
 
 
 @lru_cache

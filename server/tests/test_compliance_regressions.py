@@ -131,7 +131,7 @@ def test_versioned_migration_upgrades_existing_database(tmp_path):
     app=create_app(Settings(database_url=f'sqlite+aiosqlite:///{path}'))
     with TestClient(app): pass
     conn=sqlite3.connect(path)
-    assert conn.execute('PRAGMA user_version').fetchone()[0]==4
+    assert conn.execute('PRAGMA user_version').fetchone()[0]==6
     assert list(tmp_path.glob('old.db.pre-migration-*.bak'))
     assert conn.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='rate_limits'").fetchone()[0]==1
     columns={row[1] for row in conn.execute('PRAGMA table_info(tickets)')}

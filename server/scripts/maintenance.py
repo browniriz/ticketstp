@@ -14,11 +14,11 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from ticketsbot.config import Settings
 from ticketsbot.db import Database
-from ticketsbot.models import Ticket
+from ticketsbot.models import Attachment, BridgeSequence, Ticket, TicketTombstone, utcnow
 from ticketsbot.workers import BridgeClient, ticket_row
 
 LOCAL_TZ = timezone(timedelta(hours=5), "Asia/Yekaterinburg")
@@ -143,6 +143,9 @@ async def import_csv(settings, source):
             raise ValueError("duplicate ticket number in import")
         async with db.session() as session:
             for incoming in parsed:
+                if (await session.execute(select(TicketTombstone.id).where(
+                        TicketTombstone.number == incoming.number))).scalar_one_or_none() is not None:
+                    raise ValueError(f"ticket {incoming.number} is permanently deleted")
                 current = (await session.execute(
                     select(Ticket).where(Ticket.number == incoming.number)
                 )).scalar_one_or_none()
@@ -184,6 +187,8 @@ async def reconcile(settings, apply=False, bridge=None):
     try:
         async with db.session() as session:
             tickets = list((await session.execute(select(Ticket).order_by(Ticket.number))).scalars())
+            tombstones = {row.number: row for row in
+                          (await session.execute(select(TicketTombstone))).scalars()}
         local_rows = [ticket_row(ticket) for ticket in tickets]
         snapshot = await bridge.call("bridgePullTickets")
         sheet_rows = snapshot.get("rows") if isinstance(snapshot, dict) else None
@@ -196,6 +201,7 @@ async def reconcile(settings, apply=False, bridge=None):
             raise ValueError("duplicate ticket number in sheet snapshot")
         missing = sorted(set(local) - set(sheet))
         extra = sorted(set(sheet) - set(local))
+        tombstoned_extra = sorted(set(extra) & set(tombstones))
         different = []
         for number in sorted(set(local) & set(sheet)):
             fields = [TICKET_COLUMNS[i] for i, pair in enumerate(zip(local[number], sheet[number]))
@@ -211,6 +217,7 @@ async def reconcile(settings, apply=False, bridge=None):
             "status_counts": {"local": _status_counts(local_rows),
                               "sheet": _status_counts(normalized_sheet)},
             "details": {"missing_in_sheet": missing, "extra_in_sheet": extra,
+                        "tombstoned_extra_in_sheet": tombstoned_extra,
                         "different": different},
             "applied": False,
         }
@@ -225,8 +232,20 @@ async def reconcile(settings, apply=False, bridge=None):
                     ).hexdigest()
                     for row in batch
                 ]
+                sequences = []
+                async with db.session() as session:
+                    for row in batch:
+                        key = "ticket:" + str(row[0])
+                        state = await session.get(BridgeSequence, key)
+                        if state is None:
+                            state = BridgeSequence(entity_key=key, version=1)
+                            session.add(state)
+                        else:
+                            state.version += 1
+                        sequences.append(state.version)
+                    await session.commit()
                 response = await bridge.call("bridgeBatchUpsertTickets", rows=batch,
-                                             dedupe_keys=dedupe_keys)
+                                             sequences=sequences, dedupe_keys=dedupe_keys)
                 acknowledgments = response.get("acknowledgments") if isinstance(response, dict) else None
                 if not isinstance(acknowledgments, list) or len(acknowledgments) != len(batch):
                     raise RuntimeError("bridge acknowledged incomplete batch")
@@ -235,14 +254,30 @@ async def reconcile(settings, apply=False, bridge=None):
                 for ack in acknowledgments:
                     if not isinstance(ack, dict):
                         raise RuntimeError("bridge returned invalid batch acknowledgment")
-                    actual.add((str(ack.get("number", "")), str(ack.get("dedupe_key", ""))))
+                    ack_key = str(ack.get("dedupe_key", ""))
+                    if ack_key not in dedupe_keys or ack.get("sequence") != sequences[dedupe_keys.index(ack_key)]:
+                        raise RuntimeError("bridge returned mismatched batch sequence")
+                    actual.add((str(ack.get("number", "")), ack_key))
                 if len(actual) != len(acknowledgments) or actual != expected:
                     raise RuntimeError("bridge returned mismatched batch acknowledgment")
                 count = response.get("upserted")
                 if not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= len(batch):
                     raise RuntimeError("bridge returned invalid upsert count")
                 applied += len(acknowledgments)
-            result.update(applied=True, upserted=applied)
+            deleted = 0
+            for number in tombstoned_extra:
+                tombstone = tombstones[number]
+                dedupe_key = f"reconcile-delete:{number}:{tombstone.sequence}"
+                ack = await bridge.call("bridgeDeleteTicket", number=number,
+                                        sequence=tombstone.sequence, dedupe_key=dedupe_key)
+                if (not isinstance(ack, dict) or ack.get("absent") is not True
+                        or str(ack.get("number", "")) != number
+                        or ack.get("sequence") != tombstone.sequence
+                        or ack.get("current_sequence") != tombstone.sequence
+                        or str(ack.get("dedupe_key", "")) != dedupe_key):
+                    raise RuntimeError("bridge did not confirm tombstoned ticket absence")
+                deleted += 1
+            result.update(applied=True, upserted=applied, deleted_tombstoned=deleted)
         return result
     finally:
         await db.close()
@@ -346,6 +381,46 @@ def backup(settings, destination):
         shutil.rmtree(stage, ignore_errors=True)
 
 
+async def cleanup_quarantine(settings, now=None):
+    """Idempotently remove expired quarantined media without escaping media_dir."""
+    db = Database(settings)
+    await db.initialize()
+    now = now or utcnow()
+    root = settings.media_dir.resolve()
+    removed_files = missing_files = unsafe = removed_records = 0
+    try:
+        async with db.session() as session:
+            rows = list((await session.execute(select(Attachment).where(
+                Attachment.quarantined_at.is_not(None), Attachment.retain_until.is_not(None),
+                Attachment.retain_until <= now))).scalars())
+            for row in rows:
+                path = (root / row.stored_name).resolve()
+                try:
+                    path.relative_to(root)
+                except ValueError:
+                    unsafe += 1
+                    continue
+                try:
+                    if path.is_file():
+                        path.unlink()
+                        removed_files += 1
+                    elif path.exists():
+                        unsafe += 1
+                        continue
+                    else:
+                        missing_files += 1
+                except OSError:
+                    continue
+                await session.delete(row)
+                removed_records += 1
+            await session.commit()
+        return {"expired": len(rows), "removed_files": removed_files,
+                "missing_files": missing_files, "unsafe": unsafe,
+                "removed_records": removed_records}
+    finally:
+        await db.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -355,11 +430,16 @@ def main():
     reconciler.add_argument("--apply", action="store_true")
     backup_parser = sub.add_parser("backup")
     backup_parser.add_argument("destination")
+    sub.add_parser("cleanup-quarantine")
     args = parser.parse_args()
     settings = Settings()
-    result = backup(settings, args.destination) if args.command == "backup" else asyncio.run(
-        import_csv(settings, args.csv) if args.command == "import" else reconcile(settings, args.apply)
-    )
+    if args.command == "backup":
+        result = backup(settings, args.destination)
+    elif args.command == "cleanup-quarantine":
+        result = asyncio.run(cleanup_quarantine(settings))
+    else:
+        result = asyncio.run(import_csv(settings, args.csv) if args.command == "import"
+                             else reconcile(settings, args.apply))
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

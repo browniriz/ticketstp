@@ -17,6 +17,8 @@ try {
   Stop-ScheduledTask -TaskName "TicketsbotWorkers" -ErrorAction SilentlyContinue
   & $python $maintenance backup $destination *>> (Join-Path $logs "backup.log")
   if ($LASTEXITCODE -ne 0) { throw "Backup command failed with exit code $LASTEXITCODE" }
+  & $python $maintenance cleanup-quarantine *>> (Join-Path $logs "cleanup.log")
+  if ($LASTEXITCODE -ne 0) { throw "Quarantine cleanup failed with exit code $LASTEXITCODE" }
 } finally {
   if ($wasRunning) { Start-Service $ServiceName }
   Start-ScheduledTask -TaskName "TicketsbotWorkers" -ErrorAction SilentlyContinue

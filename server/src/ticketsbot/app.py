@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import base64
 from contextlib import asynccontextmanager
+import hashlib
 import json
+from pathlib import Path
+import re
 import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from sqlalchemy import select
 
 from .auth import AuthError, verify_init_data
+from .admin import router as admin_router
 from .config import Settings, get_settings
 from .db import Database
 from .legacy_api import router
@@ -61,10 +66,18 @@ class RequestBodyLimitMiddleware:
 def create_app(settings: Settings | None = None, telegram_client=None, sheet_client=None) -> FastAPI:
     settings = settings or get_settings()
     db = Database(settings)
+    admin_html = Path(__file__).with_name("static") / "admin.html"
+    admin_source = admin_html.read_text(encoding="utf-8")
+    admin_scripts = re.findall(r"<script>([\s\S]*?)</script>", admin_source)
+    if len(admin_scripts) != 1:
+        raise RuntimeError("Admin panel must contain exactly one inline script")
+    admin_script_hash = base64.b64encode(hashlib.sha256(
+        admin_scripts[0].encode("utf-8")).digest()).decode("ascii")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         settings.validate_public_base_url()
+        settings.validate_admin_configuration()
         await db.initialize()
         settings.media_dir.mkdir(parents=True, exist_ok=True)
         workers = WorkerManager(db, settings, telegram_client, sheet_client)
@@ -87,6 +100,24 @@ def create_app(settings: Settings | None = None, telegram_client=None, sheet_cli
     @app.get("/health")
     async def health():
         return {"status": "ok", "database": await db.integrity_check()}
+
+    @app.get("/admin", include_in_schema=False)
+    async def admin_redirect():
+        return RedirectResponse("/admin/", status_code=308)
+
+    @app.get("/admin/", include_in_schema=False)
+    async def admin_panel():
+        return FileResponse(admin_html, media_type="text/html; charset=utf-8", headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": (
+                "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; "
+                f"script-src 'sha256-{admin_script_hash}'; style-src 'unsafe-inline'; img-src 'self' data:; "
+                "connect-src 'self'"
+            ),
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+        })
 
     @app.post("/media/session")
     async def media_session(request: Request):
@@ -143,4 +174,5 @@ def create_app(settings: Settings | None = None, telegram_client=None, sheet_cli
                                 headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
     app.include_router(router)
+    app.include_router(admin_router)
     return app

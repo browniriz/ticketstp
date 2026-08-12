@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import select
 
 from ticketsbot.config import Settings
-from ticketsbot.models import Role, Ticket
+from ticketsbot.models import Role, Ticket, TicketTombstone
 from ticketsbot.workers import ROLE_HEADERS, WorkerManager, ticket_row
 
 SPEC = importlib.util.spec_from_file_location("maintenance", Path(__file__).parents[1] / "scripts" / "maintenance.py")
@@ -108,8 +108,8 @@ class TicketBridge:
         if action == "bridgePullTickets": return {"rows": self.rows}
         assert len(payload["rows"]) == len(payload["dedupe_keys"])
         return {"upserted": len(payload["rows"]), "acknowledgments": [
-            {"number": row[0], "dedupe_key": key}
-            for row, key in zip(payload["rows"], payload["dedupe_keys"])
+            {"number": row[0], "sequence": sequence, "dedupe_key": key}
+            for row, sequence, key in zip(payload["rows"], payload["sequences"], payload["dedupe_keys"])
         ]}
 
 
@@ -183,11 +183,39 @@ async def test_reconcile_rejects_mismatched_batch_ack(tmp_path):
         async def call(self, action, **payload):
             if action == "bridgePullTickets": return {"rows": []}
             return {"upserted": 1, "acknowledgments": [
-                {"number": "Z999", "dedupe_key": payload["dedupe_keys"][0]}
+                {"number": "Z999", "sequence": payload["sequences"][0],
+                 "dedupe_key": payload["dedupe_keys"][0]}
             ]}
 
     with pytest.raises(RuntimeError, match="mismatched batch acknowledgment"):
         await maintenance.reconcile(settings, apply=True, bridge=BadAckBridge([]))
+
+
+@pytest.mark.parametrize("bad_field", ["dedupe_key", "current_sequence"])
+@pytest.mark.asyncio
+async def test_reconcile_delete_rejects_wrong_ack_identity(tmp_path, bad_field):
+    settings = Settings(database_url=f"sqlite+aiosqlite:///{tmp_path / ('delete-' + bad_field + '.db')}")
+    db = maintenance.Database(settings); await db.initialize()
+    async with db.session() as session:
+        session.add(TicketTombstone(number="A001", ticket_id=1, snapshot_json="{}", sequence=7))
+        await session.commit()
+    await db.close()
+    sheet_row = ["A001", "02.01.2026 08:04:05", "Касса", "Пермь", "1", "N", "D", "решена",
+                 "1", "", "", "", "00:00", "", "02.01.2026 08:04:05", "", "", ""]
+
+    class BadDeleteAckBridge:
+        async def call(self, action, **payload):
+            if action == "bridgePullTickets":
+                return {"rows": [sheet_row]}
+            assert action == "bridgeDeleteTicket"
+            ack = {"number": payload["number"], "sequence": payload["sequence"],
+                   "current_sequence": payload["sequence"], "dedupe_key": payload["dedupe_key"],
+                   "absent": True}
+            ack[bad_field] = "wrong" if bad_field == "dedupe_key" else payload["sequence"] + 1
+            return ack
+
+    with pytest.raises(RuntimeError, match="tombstoned ticket absence"):
+        await maintenance.reconcile(settings, apply=True, bridge=BadDeleteAckBridge())
 
 
 def test_apps_script_bridge_and_role_revision_static_contract():

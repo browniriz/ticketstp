@@ -51,7 +51,7 @@ def test_revision_three_database_upgrades_bridge_sequences(tmp_path):
     asyncio.run(database.close())
     connection = sqlite3.connect(path)
     try:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
         columns = {row[1] for row in connection.execute("PRAGMA table_info(bridge_sequences)")}
         assert columns == {"entity_key", "version"}
     finally:
@@ -62,7 +62,7 @@ def test_current_revision_still_validates_physical_schema(tmp_path):
     path = tmp_path / "lying-current.db"
     connection = sqlite3.connect(path)
     connection.execute("CREATE TABLE tickets (id INTEGER PRIMARY KEY)")
-    connection.execute("PRAGMA user_version=4")
+    connection.execute("PRAGMA user_version=6")
     connection.commit()
     connection.close()
 

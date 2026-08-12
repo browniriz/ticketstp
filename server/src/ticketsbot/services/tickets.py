@@ -4,10 +4,11 @@ import json, random, string, math
 from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import Attachment, Ticket, TicketEvent, utcnow
+from ..models import Attachment, BridgeSequence, Ticket, TicketEvent, TicketTombstone, utcnow
 from ..attachments import attachment_url, discard, finalize, model_from_stage, stage_data_url
 from .constants import DONE, FIXED, NEW, PAUSE, REJECTED, REVISION, TERMINAL, WORK
 from .roles import UserError, raw_role, require_admin
@@ -45,8 +46,13 @@ def format_min_sec(seconds: int) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
-def intents(session, ticket, operation, *, actor_name=""):
-    key=f"ticket:{ticket.id}:v{ticket.version}:{operation}"
+async def intents(session, ticket, operation, *, actor_name=""):
+    entity_key = f"ticket:{ticket.number}"
+    stmt = insert(BridgeSequence).values(entity_key=entity_key, version=1).on_conflict_do_update(
+        index_elements=[BridgeSequence.entity_key], set_={"version": BridgeSequence.version + 1},
+    ).returning(BridgeSequence.version)
+    sequence = int((await session.execute(stmt)).scalar_one())
+    key=f"ticket:{ticket.id}:seq{sequence}:{operation}"
     payload={
         "kind":"ticket", "operation":operation, "ticket_id":ticket.id,
         "number":ticket.number, "status":ticket.status, "creator_id":ticket.creator_id,
@@ -54,7 +60,7 @@ def intents(session, ticket, operation, *, actor_name=""):
         "reason":ticket.reason or "", "elapsed_seconds":ticket.elapsed_seconds,
         "type":ticket.type, "city":ticket.city, "office":ticket.office,
         "sender_name":ticket.sender_name, "description":ticket.description,
-        "version":ticket.version,
+        "version":ticket.version, "sequence":sequence,
     }
     sheet(session,key,"ticket",ticket.id,operation,payload)
     if operation == "create":
@@ -113,6 +119,10 @@ async def create_ticket(session: AsyncSession, actor: dict, body: dict) -> dict:
     staged = stage_data_url(session.info["settings"], body["image"], body.get("filename")) if body.get("image") else None
     for _ in range(220):
         number = random.choice(string.ascii_uppercase) + f"{random.randrange(1000):03d}"
+        if ((await session.execute(select(Ticket.id).where(Ticket.number == number))).scalar_one_or_none() is not None
+                or (await session.execute(select(TicketTombstone.id).where(
+                    TicketTombstone.number == number))).scalar_one_or_none() is not None):
+            continue
         now = utcnow(); ticket = Ticket(number=number, created_at=now, type=typ, city=str(body["city"]).strip(), office=str(body["office"]).strip(), sender_name=str(body["name"]).strip(), description=str(body["description"]).strip(), status=NEW, creator_id=actor["tg_id"], updated_at=now)
         session.add(ticket)
         try:
@@ -121,7 +131,7 @@ async def create_ticket(session: AsyncSession, actor: dict, body: dict) -> dict:
                 finalize(staged, session.info["settings"])
                 session.add(model_from_stage(staged, ticket.id))
                 ticket.file_url = attachment_url(session.info["settings"], staged.token)
-            await event(session, ticket, actor["tg_id"], "create"); intents(session,ticket,"create"); await session.commit(); await session.refresh(ticket)
+            await event(session, ticket, actor["tg_id"], "create"); await intents(session,ticket,"create"); await session.commit(); await session.refresh(ticket)
             return {"ticket": serialize(ticket)}
         except IntegrityError:
             await session.rollback()
@@ -173,7 +183,7 @@ async def transition(session, actor, body, allowed, target, error, *, require_re
     if target==REJECTED: values.update(admin_id=actor["tg_id"],admin_name=str(body.get("name") or (await raw_role(session,actor["tg_id"]))["name"] or ticket.admin_name))
     result=await session.execute(update(Ticket).where(Ticket.id==ticket.id,Ticket.version==ticket.version,Ticket.status==old).values(**values))
     if result.rowcount != 1: await session.rollback(); raise UserError("Заявка была изменена другим пользователем. Обновите список.")
-    await session.refresh(ticket); await event(session,ticket,actor["tg_id"],target,old); intents(session,ticket,"resume" if target==WORK else target); await session.commit()
+    await session.refresh(ticket); await event(session,ticket,actor["tg_id"],target,old); await intents(session,ticket,"resume" if target==WORK else target); await session.commit()
     return {"ticket":serialize(ticket)}
 
 
@@ -185,7 +195,7 @@ async def take_ticket(session, actor, body):
     if ticket.idle_seconds is None: values["idle_seconds"]=max(0,int((now-aware(ticket.created_at)).total_seconds()))
     result=await session.execute(update(Ticket).where(Ticket.id==ticket.id,Ticket.version==ticket.version,Ticket.status.in_((NEW,FIXED))).values(**values))
     if result.rowcount!=1: await session.rollback(); raise UserError("Заявку нельзя взять в работу в текущем статусе.")
-    await session.refresh(ticket); await event(session,ticket,actor["tg_id"],"take",old); intents(session,ticket,"take"); await session.commit(); return {"ticket":serialize(ticket)}
+    await session.refresh(ticket); await event(session,ticket,actor["tg_id"],"take",old); await intents(session,ticket,"take"); await session.commit(); return {"ticket":serialize(ticket)}
 
 
 async def pause_ticket(s,a,b): return await transition(s,a,b,{WORK},PAUSE,"Заявка не в работе.")
@@ -215,7 +225,7 @@ async def resubmit_ticket(session,actor,body):
         old_stored = None
         if staged:
             finalize(staged,session.info["settings"]); session.add(model_from_stage(staged,t.id)); old_stored = await _mark_old_attachment_stale(session,old_url,staged.token)
-        await session.refresh(t); await event(session,t,actor["tg_id"],"resubmit",REVISION); intents(session,t,"resubmit"); await session.commit()
+        await session.refresh(t); await event(session,t,actor["tg_id"],"resubmit",REVISION); await intents(session,t,"resubmit"); await session.commit()
         if old_stored:
             try: (session.info["settings"].media_dir/old_stored).unlink(missing_ok=True)
             except OSError: pass
@@ -238,7 +248,7 @@ async def transfer_ticket(session,actor,body):
     from_name=str(body.get("name") or actor_role["name"] or t.admin_name or "")
     result=await session.execute(update(Ticket).where(Ticket.id==t.id,Ticket.version==old_version,Ticket.status.in_((WORK,PAUSE))).values(admin_id=target,admin_name=role["name"],updated_at=utcnow(),version=old_version+1))
     if result.rowcount!=1: await session.rollback(); raise UserError("Заявка была изменена другим пользователем. Обновите список.")
-    await session.refresh(t); await event(session,t,actor["tg_id"],"transfer",old); intents(session,t,"transfer",actor_name=from_name); await session.commit(); return {"ticket":serialize(t)}
+    await session.refresh(t); await event(session,t,actor["tg_id"],"transfer",old); await intents(session,t,"transfer",actor_name=from_name); await session.commit(); return {"ticket":serialize(t)}
 
 
 async def add_screenshot(session,actor,body):
@@ -251,7 +261,7 @@ async def add_screenshot(session,actor,body):
         finalize(staged,session.info["settings"]); session.add(model_from_stage(staged,t.id))
         t.file_url=attachment_url(session.info["settings"],staged.token); t.updated_at=utcnow(); t.version+=1
         old_stored = await _mark_old_attachment_stale(session,old_url,staged.token)
-        await event(session,t,actor["tg_id"],"attachment"); intents(session,t,"attachment"); await session.commit()
+        await event(session,t,actor["tg_id"],"attachment"); await intents(session,t,"attachment"); await session.commit()
         if old_stored:
             try: (session.info["settings"].media_dir/old_stored).unlink(missing_ok=True)
             except OSError: pass

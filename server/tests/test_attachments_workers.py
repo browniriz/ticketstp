@@ -70,7 +70,8 @@ class FakeBridge:
             return {'headers':ROLE_HEADERS,'rows':rows,'revision':1,'count':1,
                     'hash':hashlib.sha256(canonical.encode()).hexdigest()}
         if action=='bridgeUpsertTicket':
-            return {'number':payload['row'][0],'dedupe_key':payload['dedupe_key']}
+            return {'number':payload['row'][0],'sequence':payload['sequence'],
+                    'dedupe_key':payload['dedupe_key']}
         if action=='bridgeMirrorAccess':
             item=payload['payload']
             return {'tg_id':str(item.get('tg_id') or item.get('creator_id') or ''),

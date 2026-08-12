@@ -12,7 +12,7 @@ from sqlalchemy.schema import CreateIndex
 from .config import Settings
 from .models import Base
 
-SCHEMA_REVISION = 4
+SCHEMA_REVISION = 6
 SAFE_LEGACY_TICKET_COLUMNS = {"id", "number", "status"}
 
 
@@ -80,7 +80,8 @@ class Database:
         if missing:
             raise MigrationError(f"ticket {missing[0]} has no required number")
         model_columns = {column.name for column in Base.metadata.tables["tickets"].columns}
-        if columns != model_columns and not columns <= SAFE_LEGACY_TICKET_COLUMNS:
+        prior_columns = model_columns - {"archived_at"}
+        if columns not in (model_columns, prior_columns) and not columns <= SAFE_LEGACY_TICKET_COLUMNS:
             unknown = sorted(columns - model_columns)
             absent = sorted(model_columns - columns)
             raise MigrationError(
@@ -109,6 +110,7 @@ class Database:
                 "admin_id": "''", "admin_name": "''", "elapsed_seconds": "0",
                 "file_url": "''", "reason": "''", "version": "1",
                 "work_started_at": "NULL", "resolved_at": "NULL", "idle_seconds": "NULL",
+                "archived_at": "NULL",
             }
             for column in table.columns:
                 if column.name in legacy_ticket_columns:
@@ -166,6 +168,47 @@ class Database:
             raise MigrationError("revision 4 created an incompatible bridge_sequences table")
 
     @staticmethod
+    def _revision_5(sync_connection) -> None:
+        """Administrative sessions, audit/tombstones and media quarantine."""
+        for name in ("admin_sessions", "admin_audit", "ticket_tombstones"):
+            Base.metadata.tables[name].create(sync_connection, checkfirst=True)
+        inspector = inspect(sync_connection)
+        additions = {
+            "tickets": (("archived_at", "DATETIME"),),
+            "attachments": (("quarantined_at", "DATETIME"), ("retain_until", "DATETIME")),
+        }
+        for table, columns_to_add in additions.items():
+            present = {c["name"] for c in inspector.get_columns(table)}
+            for name, sql_type in columns_to_add:
+                if name not in present:
+                    sync_connection.exec_driver_sql(
+                        f'ALTER TABLE "{table}" ADD COLUMN "{name}" {sql_type}'
+                    )
+        for table in Base.metadata.sorted_tables:
+            for index in table.indexes:
+                sync_connection.execute(CreateIndex(index, if_not_exists=True))
+        sync_connection.exec_driver_sql(
+            "CREATE TRIGGER IF NOT EXISTS admin_audit_no_update BEFORE UPDATE ON admin_audit "
+            "BEGIN SELECT RAISE(ABORT, 'admin audit is append-only'); END"
+        )
+        sync_connection.exec_driver_sql(
+            "CREATE TRIGGER IF NOT EXISTS admin_audit_no_delete BEFORE DELETE ON admin_audit "
+            "BEGIN SELECT RAISE(ABORT, 'admin audit is append-only'); END"
+        )
+
+    @staticmethod
+    def _revision_6(sync_connection) -> None:
+        """Add per-session CSRF material and invalidate sessions created without it."""
+        columns = {c["name"] for c in inspect(sync_connection).get_columns("admin_sessions")}
+        if "csrf_secret" not in columns:
+            sync_connection.exec_driver_sql(
+                "ALTER TABLE admin_sessions ADD COLUMN csrf_secret VARCHAR(64) NOT NULL DEFAULT ''"
+            )
+        sync_connection.exec_driver_sql(
+            "UPDATE admin_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE csrf_secret='' AND revoked_at IS NULL"
+        )
+
+    @staticmethod
     def _validate_current_schema(sync_connection) -> None:
         """Fail closed if user_version claims current but the physical schema is not."""
         inspector = inspect(sync_connection)
@@ -208,7 +251,8 @@ class Database:
                 raise MigrationError(f"database revision {version} is newer than supported {SCHEMA_REVISION}")
             if version < SCHEMA_REVISION:
                 await connection.run_sync(self._preflight)
-                revisions = (self._revision_1, self._revision_2, self._revision_3, self._revision_4)
+                revisions = (self._revision_1, self._revision_2, self._revision_3,
+                             self._revision_4, self._revision_5, self._revision_6)
                 for revision in range(version + 1, SCHEMA_REVISION + 1):
                     await connection.run_sync(revisions[revision - 1])
                     await connection.execute(text(f"PRAGMA user_version={revision}"))

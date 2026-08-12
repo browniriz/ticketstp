@@ -332,10 +332,11 @@ function bridgeRateLimit_() {
 function bridgeRoute_(action, body) {
   if (action === 'bridgePullRoles') return bridgeRolesSnapshot_();
   if (action === 'bridgePullTickets') return bridgeTicketsSnapshot_();
-  if (action === 'bridgeUpsertTicket') return bridgeUpsertTicket_(body.row, body.dedupe_key);
+  if (action === 'bridgeUpsertTicket') return bridgeUpsertTicket_(body.row, body.sequence, body.dedupe_key);
+  if (action === 'bridgeDeleteTicket') return bridgeDeleteTicket_(body.number, body.sequence, body.dedupe_key);
   if (action === 'bridgeBatchUpsertTickets') {
     if (!Array.isArray(body.rows) || body.rows.length > 200) throw new Error('invalid batch');
-    return bridgeBatchUpsertTickets_(body.rows, body.dedupe_keys || []);
+    return bridgeBatchUpsertTickets_(body.rows, body.sequences || [], body.dedupe_keys || []);
   }
   if (action === 'bridgeMirrorAccess') return bridgeMirrorAccess_(body);
   throw new Error('unknown bridge action');
@@ -404,38 +405,68 @@ function validateBridgeTicketRow_(row) {
   if (row[15] && !/^\d+:[0-5]\d$/.test(String(row[15]))) throw new Error('invalid idle duration');
 }
 
-function bridgeUpsertTicket_(row, dedupeKey) {
+function bridgeUpsertTicket_(row, sequence, dedupeKey) {
   validateBridgeTicketRow_(row);
+  sequence = Number(sequence);
+  if (!Number.isInteger(sequence) || sequence < 1) throw new Error('invalid ticket sequence');
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) throw new Error('bridge busy');
   try {
     var desired = normalizeTicketDateCells_(row.slice());
     var props = PropertiesService.getScriptProperties(), doneKey = bridgeStateKey_('bridge_done_', dedupeKey);
     var previous = props.getProperty(doneKey);
+    var sequenceKey = bridgeStateKey_('bridge_ticket_seq_', String(desired[0]));
+    var previousSequence = Number(props.getProperty(sequenceKey) || 0);
     var sh = ensureSheet_(getSpreadsheet_(), SHEET_TICKETS, TICKETS_HEADERS);
     var map = buildRowMap_(sh), existingIndex = map[String(desired[0])];
-    if (previous && existingIndex) {
+    if (sequence < previousSequence) throw new Error('stale ticket sequence');
+    if (previous && sequence === previousSequence && existingIndex) {
       var existing = canonicalBridgeTicketRow_(normalizeTicketDateCells_(sh.getRange(existingIndex, 1, 1, 18).getValues()[0]));
       if (JSON.stringify(existing) === JSON.stringify(desired)) return JSON.parse(previous);
     }
+    if (sequence === previousSequence) throw new Error('conflicting ticket sequence');
     row = sanitizeBridgeTicketRow_(desired.slice());
     var index = existingIndex || nextTicketRow_(sh);
     sh.getRange(index, 1, 1, 18).setValues([row]);
     invalidateTicketCache_(); invalidateRowMap_();
-    var ack = { number: String(row[0]), row: index, dedupe_key: String(dedupeKey) };
+    props.setProperty(sequenceKey, String(sequence));
+    var ack = { number: String(row[0]), row: index, sequence: sequence, dedupe_key: String(dedupeKey) };
     props.setProperty(doneKey, JSON.stringify(ack));
     return ack;
   } finally { lock.releaseLock(); }
 }
 
-function bridgeBatchUpsertTickets_(rows, dedupeKeys) {
+function bridgeDeleteTicket_(number, sequence, dedupeKey) {
+  number = String(number || ''); sequence = Number(sequence);
+  if (!/^[A-Z][0-9]{3}$/.test(number) || !Number.isInteger(sequence) || sequence < 1) throw new Error('invalid ticket delete');
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) throw new Error('bridge busy');
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var doneKey = bridgeStateKey_('bridge_done_', dedupeKey), prior = props.getProperty(doneKey);
+    var sequenceKey = bridgeStateKey_('bridge_ticket_seq_', number);
+    var previousSequence = Number(props.getProperty(sequenceKey) || 0);
+    if (sequence < previousSequence) throw new Error('stale ticket sequence');
+    var sh = ensureSheet_(getSpreadsheet_(), SHEET_TICKETS, TICKETS_HEADERS);
+    var map = buildRowMap_(sh), row = map[number], deleted = false;
+    if (row) { sh.deleteRow(row); deleted = true; }
+    if (sequence > previousSequence) props.setProperty(sequenceKey, String(sequence));
+    var ack = { number: number, sequence: sequence, dedupe_key: String(dedupeKey), deleted: deleted,
+      absent: !buildRowMap_(sh)[number], current_sequence: Math.max(sequence, previousSequence) };
+    props.setProperty(doneKey, JSON.stringify(ack));
+    invalidateTicketCache_(); invalidateRowMap_();
+    return ack;
+  } finally { lock.releaseLock(); }
+}
+
+function bridgeBatchUpsertTickets_(rows, sequences, dedupeKeys) {
   var seen = {};
   rows.forEach(function (row) {
     validateBridgeTicketRow_(row);
     if (seen[String(row[0])]) throw new Error('duplicate ticket in batch');
     seen[String(row[0])] = true;
   });
-  if (dedupeKeys.length !== rows.length) throw new Error('invalid batch dedupe keys');
+  if (dedupeKeys.length !== rows.length || sequences.length !== rows.length) throw new Error('invalid batch metadata');
   if (!rows.length) return { upserted: 0, acknowledgments: [] };
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) throw new Error('bridge busy');
@@ -446,13 +477,22 @@ function bridgeBatchUpsertTickets_(rows, dedupeKeys) {
     rows.forEach(function (row, i) {
       var key = bridgeStateKey_('bridge_done_', dedupeKeys[i]), prior = props.getProperty(key);
       var desired = normalizeTicketDateCells_(row.slice());
+      var sequence = Number(sequences[i]);
+      if (!Number.isInteger(sequence) || sequence < 1) throw new Error('invalid ticket sequence');
+      var sequenceKey = bridgeStateKey_('bridge_ticket_seq_', String(desired[0]));
+      var previousSequence = Number(props.getProperty(sequenceKey) || 0);
+      if (sequence < previousSequence) throw new Error('stale ticket sequence');
       var existingIndex = map[String(desired[0])], currentMatches = false;
       if (prior && existingIndex) {
         var current = canonicalBridgeTicketRow_(normalizeTicketDateCells_(sh.getRange(existingIndex, 1, 1, 18).getValues()[0]));
         currentMatches = JSON.stringify(current) === JSON.stringify(desired);
       }
-      if (prior && currentMatches) acknowledgments.push(JSON.parse(prior));
-      else pending.push({ row: sanitizeBridgeTicketRow_(desired.slice()), key: key, dedupe: String(dedupeKeys[i]) });
+      if (prior && sequence === previousSequence && currentMatches) acknowledgments.push(JSON.parse(prior));
+      else {
+        if (sequence === previousSequence) throw new Error('conflicting ticket sequence');
+        pending.push({ row: sanitizeBridgeTicketRow_(desired.slice()), key: key, sequenceKey: sequenceKey,
+          sequence: sequence, dedupe: String(dedupeKeys[i]) });
+      }
     });
     var next = nextTicketRow_(sh);
     pending.forEach(function (item) {
@@ -467,7 +507,8 @@ function bridgeBatchUpsertTickets_(rows, dedupeKeys) {
       start = end;
     }
     pending.forEach(function (item) {
-      var ack = { number: String(item.row[0]), row: item.index, dedupe_key: item.dedupe };
+      props.setProperty(item.sequenceKey, String(item.sequence));
+      var ack = { number: String(item.row[0]), row: item.index, sequence: item.sequence, dedupe_key: item.dedupe };
       props.setProperty(item.key, JSON.stringify(ack)); acknowledgments.push(ack);
     });
     invalidateTicketCache_(); invalidateRowMap_();

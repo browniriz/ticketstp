@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+import hashlib
+from datetime import timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, Field
+from sqlalchemy import func, or_, select
+
+from .admin_auth import (COOKIE_NAME, clear_login_failures, login_allowed, make_cookie,
+                         new_session, record_login_failure, require_admin_origin,
+                         require_admin_session, require_admin_state_change, verify_password)
+from .models import (AdminAudit, AdminSession, Attachment, SheetSyncOutbox, Ticket,
+                     TicketEvent, utcnow)
+from .services.admin import archive_ticket, delete_ticket
+
+router = APIRouter(prefix="/admin/api", tags=["admin"])
+
+
+class LoginBody(BaseModel):
+    password: str = Field(max_length=1024)
+
+
+class DeleteBody(BaseModel):
+    confirm_number: str = Field(max_length=32)
+
+
+def value(value):
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
+def model_dict(row) -> dict:
+    return {column.name: value(getattr(row, column.name)) for column in row.__table__.columns}
+
+
+@router.post("/login")
+async def login(body: LoginBody, request: Request, response: Response):
+    require_admin_origin(request)
+    settings, db = request.app.state.settings, request.app.state.db
+    if not settings.admin_password_hash or len(settings.admin_session_secret) < 32:
+        raise HTTPException(503, "Admin authentication is not configured")
+    remote = request.client.host if request.client else "unknown"
+    key = f"{id(db)}:{remote}"
+    if not login_allowed(key, settings.admin_login_max_attempts, settings.admin_login_window_seconds):
+        raise HTTPException(429, "Too many login attempts")
+    if not verify_password(body.password, settings.admin_password_hash):
+        record_login_failure(key)
+        raise HTTPException(401, "Invalid credentials")
+    clear_login_failures(key)
+    raw, row = new_session(settings.admin_session_ttl_seconds, remote)
+    async with db.session() as session:
+        session.add(row); await session.commit()
+    response.set_cookie(COOKIE_NAME, make_cookie(raw, settings.admin_session_secret),
+                        max_age=settings.admin_session_ttl_seconds, httponly=True, secure=True,
+                        samesite="strict", path="/admin")
+    return {"authenticated": True, "expires_at": value(row.expires_at),
+            "csrf_token": row.csrf_secret}
+
+
+@router.get("/session")
+async def session_status(admin: AdminSession = Depends(require_admin_session)):
+    return {"authenticated": True, "expires_at": value(admin.expires_at),
+            "csrf_token": admin.csrf_secret}
+
+
+@router.post("/logout")
+async def logout(request: Request, response: Response,
+                 admin: AdminSession = Depends(require_admin_state_change)):
+    async with request.app.state.db.session() as session:
+        row = await session.get(AdminSession, admin.id)
+        if row: row.revoked_at = utcnow()
+        await session.commit()
+    response.delete_cookie(COOKIE_NAME, path="/admin", secure=True, httponly=True, samesite="strict")
+    return {"authenticated": False}
+
+
+@router.get("/tickets")
+async def tickets(request: Request, q: str = "", status: str = "", type: str = "", city: str = "",
+                  page: int = 1, page_size: int = 50, include_archived: bool = False,
+                  _admin: AdminSession = Depends(require_admin_session)):
+    page, page_size = max(1, page), min(100, max(1, page_size))
+    filters = [] if include_archived else [Ticket.archived_at.is_(None)]
+    if q:
+        term = f"%{q[:200]}%"
+        filters.append(or_(Ticket.number.ilike(term), Ticket.description.ilike(term),
+                           Ticket.sender_name.ilike(term), Ticket.office.ilike(term)))
+    if status: filters.append(Ticket.status == status)
+    if type: filters.append(Ticket.type == type)
+    if city: filters.append(Ticket.city == city)
+    async with request.app.state.db.session() as session:
+        total = int((await session.execute(select(func.count(Ticket.id)).where(*filters))).scalar_one())
+        rows = list((await session.execute(select(Ticket).where(*filters).order_by(
+            Ticket.created_at.desc()).offset((page - 1) * page_size).limit(page_size))).scalars())
+        summary_rows = (await session.execute(select(Ticket.status, func.count(Ticket.id)).where(
+            *filters).group_by(Ticket.status))).all()
+    return {"items": [model_dict(row) for row in rows], "total": total, "page": page,
+            "page_size": page_size, "summary": {key: count for key, count in summary_rows}}
+
+
+@router.get("/tickets/{number}")
+async def ticket_detail(number: str, request: Request,
+                        _admin: AdminSession = Depends(require_admin_session)):
+    async with request.app.state.db.session() as session:
+        ticket = (await session.execute(select(Ticket).where(Ticket.number == number))).scalar_one_or_none()
+        if not ticket: raise HTTPException(404, "Ticket not found")
+        events = list((await session.execute(select(TicketEvent).where(
+            TicketEvent.ticket_id == ticket.id).order_by(TicketEvent.id))).scalars())
+        attachments = list((await session.execute(select(Attachment).where(
+            Attachment.ticket_id == ticket.id).order_by(Attachment.id))).scalars())
+        outbox = list((await session.execute(select(SheetSyncOutbox).where(
+            SheetSyncOutbox.entity_type == "ticket", SheetSyncOutbox.entity_id == str(ticket.id)
+        ).order_by(SheetSyncOutbox.id))).scalars())
+    return {"ticket": model_dict(ticket), "events": [model_dict(x) for x in events],
+            "attachments": [model_dict(x) for x in attachments],
+            "outbox": [model_dict(x) for x in outbox]}
+
+
+@router.post("/tickets/{number}/archive")
+async def archive(number: str, request: Request,
+                  admin: AdminSession = Depends(require_admin_state_change)):
+    async with request.app.state.db.session() as session:
+        ticket = await archive_ticket(session, number, admin.id)
+    return {"number": ticket.number, "archived_at": value(ticket.archived_at)}
+
+
+@router.delete("/tickets/{number}")
+async def permanent_delete(number: str, body: DeleteBody, request: Request,
+                           admin: AdminSession = Depends(require_admin_state_change)):
+    async with request.app.state.db.session() as session:
+        tombstone = await delete_ticket(session, number, body.confirm_number, admin.id,
+                                        request.app.state.settings.admin_media_retention_days)
+    return {"number": tombstone.number, "deleted": True, "google_pending": tombstone.google_deleted_at is None}

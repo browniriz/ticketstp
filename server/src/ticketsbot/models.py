@@ -56,6 +56,7 @@ class Ticket(Base):
     file_url: Mapped[str] = mapped_column(Text, default="")
     reason: Mapped[str] = mapped_column(Text, default="")
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class TicketEvent(Base):
@@ -139,3 +140,37 @@ class Attachment(Base):
     size: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    quarantined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    retain_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
+class AdminSession(Base):
+    __tablename__ = "admin_sessions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    remote_addr: Mapped[str] = mapped_column(String(64), default="")
+    csrf_secret: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+
+
+class AdminAudit(Base):
+    __tablename__ = "admin_audit"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    action: Mapped[str] = mapped_column(String(40), index=True)
+    ticket_number: Mapped[str] = mapped_column(String(32), default="", index=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class TicketTombstone(Base):
+    __tablename__ = "ticket_tombstones"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    number: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, index=True)
+    ticket_id: Mapped[int] = mapped_column(Integer)
+    snapshot_json: Mapped[str] = mapped_column(Text)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    google_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

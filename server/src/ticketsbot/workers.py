@@ -11,7 +11,8 @@ from urllib.parse import urlparse
 import httpx
 from sqlalchemy import or_, select, update
 
-from .models import NotificationOutbox, Role, SheetSyncOutbox, SyncState, Ticket, utcnow
+from .models import (NotificationOutbox, Role, SheetSyncOutbox, SyncState, Ticket,
+                     TicketTombstone, utcnow)
 from .services.constants import TICKET_TYPES
 from .services.tickets import aware, format_min_sec
 
@@ -134,14 +135,40 @@ class WorkerManager:
             row_id, token, entity_type, entity_id, operation, payload_json, dedupe_key = item
             try:
                 if entity_type == "ticket":
+                    payload = json.loads(payload_json)
+                    sequence = payload.get("sequence")
+                    if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
+                        raise RuntimeError("ticket upsert has no valid sequence")
                     async with self.db.session() as session:
                         ticket = await session.get(Ticket, int(entity_id))
                         snapshot = ticket_row(ticket) if ticket else None
                     if snapshot is None: raise RuntimeError(f"ticket {entity_id} no longer exists")
-                    ack = await self.bridge.call("bridgeUpsertTicket", row=snapshot, dedupe_key=dedupe_key)
+                    ack = await self.bridge.call("bridgeUpsertTicket", row=snapshot, sequence=sequence,
+                                                 dedupe_key=dedupe_key)
                     if (not isinstance(ack, dict) or str(ack.get("number", "")) != str(snapshot[0])
+                            or ack.get("sequence") != sequence
                             or str(ack.get("dedupe_key", "")) != dedupe_key):
                         raise RuntimeError("mismatched ticket bridge acknowledgment")
+                elif entity_type == "ticket_tombstone" and operation == "delete_ticket":
+                    payload = json.loads(payload_json)
+                    number, sequence = str(payload.get("number") or ""), payload.get("sequence")
+                    ack = await self.bridge.call("bridgeDeleteTicket", number=number,
+                                                 sequence=sequence, dedupe_key=dedupe_key)
+                    if (not isinstance(ack, dict) or str(ack.get("number", "")) != number
+                            or ack.get("sequence") != sequence
+                            or ack.get("current_sequence") != sequence
+                            or ack.get("absent") is not True
+                            or str(ack.get("dedupe_key", "")) != dedupe_key):
+                        raise RuntimeError("mismatched ticket delete acknowledgment")
+                    async with self.db.session() as session:
+                        tombstone = (await session.execute(select(TicketTombstone).where(
+                            TicketTombstone.number == number))).scalar_one_or_none()
+                        current = (await session.execute(select(Ticket).where(
+                            Ticket.number == number))).scalar_one_or_none()
+                        if tombstone is None or tombstone.sequence != sequence or current is not None:
+                            raise RuntimeError("ticket delete postcondition failed")
+                        tombstone.google_deleted_at = utcnow()
+                        await session.commit()
                 else:
                     payload = json.loads(payload_json)
                     tg_id = str(payload.get("tg_id") or payload.get("creator_id") or "")
