@@ -484,6 +484,7 @@
 // Вставь сюда URL веб-приложения Apps Script (Deploy → Web app).
 var API_URL = 'https://script.google.com/macros/s/AKfycbyPEzZ_p07LgivkErPKjuzB_6XnQtcF-Mr2lBqwK-cw_b_XC9AypfuhAGpQpHCxU2AO3g/exec';
 var API_TIMEOUT_MS = 30000;
+var API_READ_TIMEOUT_MS = 60000;
 var API_UPLOAD_TIMEOUT_MS = 90000;
 
 // ============================ DATA ============================
@@ -573,7 +574,10 @@ function api(action, payload) {
   payload.tg_id = TG_ID; // подсказка для UI; сервер доверяет только подписанному init_data
   payload.init_data = (tg && tg.initData) || '';
   if (!API_URL) return Promise.reject(new Error('API_URL не задан в index.html'));
-  var timeoutMs = payload.image ? API_UPLOAD_TIMEOUT_MS : API_TIMEOUT_MS;
+  var isLongRead = action === 'getTickets' || action === 'getMyTickets' ||
+    action === 'getHistory' || action === 'getAccess' || action === 'getLeaderboard';
+  var timeoutMs = payload.image ? API_UPLOAD_TIMEOUT_MS :
+    (isLongRead ? API_READ_TIMEOUT_MS : API_TIMEOUT_MS);
   return new Promise(function (resolve, reject) {
     var settled = false;
     var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
@@ -674,15 +678,12 @@ function loadRole() {
       if (!data || ['админ', 'сотрудник', 'гость'].indexOf(data.role) === -1) {
         throw new Error('Сервер не вернул корректную роль пользователя.');
       }
-      if (data.role === 'админ' && !Array.isArray(data.tickets)) {
-        throw new Error('Сервер не вернул список заявок администратора.');
-      }
       ROLE = data.role;
       ALLOWED_TYPES = Array.isArray(data.allowedTypes) ? data.allowedTypes : null;
       GUEST_PENDING = !!data.pending;
       if (data.name) USER_NAME = data.name;
-      // Для админа getRole сразу приносит стартовый список активных заявок —
-      // экономит второй круговой запрос (getTickets) на первом экране.
+      // Роль загружается отдельно от заявок: медленное чтение большой таблицы
+      // не должно блокировать вход администратора и проверку его доступа.
       buildUI(data.tickets);
     })
     .catch(function (e) {
