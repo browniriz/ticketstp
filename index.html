@@ -481,8 +481,9 @@
 
 <script>
 // ============================ CONFIG ============================
-// Серверный Ticketsbot API. Для быстрого отката вернуть прежний Apps Script URL из Git-истории.
-var API_URL = 'https://thpoint-ai-1c.tail272489.ts.net:8443';
+// Серверный Ticketsbot API на стандартном HTTPS-порту 443.
+// Старый адрес :8443 временно сохраняется на сервере как маршрут отката.
+var API_URL = 'https://thpoint-ai-1c.tail272489.ts.net/ticketsbot';
 var API_TIMEOUT_MS = 30000;
 var API_READ_TIMEOUT_MS = 60000;
 var API_UPLOAD_TIMEOUT_MS = 90000;
@@ -655,7 +656,8 @@ function secureMediaUrl(url) {
   try { parsed = new URL(url); } catch (e) { return Promise.reject(e); }
   var match = parsed.pathname.match(/\/media\/([^/]+)$/);
   if (!match) return Promise.resolve(url); // External/legacy (for example Google Drive).
-  return fetch(parsed.origin + '/media/session', {
+  var mediaBasePath = parsed.pathname.replace(/\/media\/[^/]+$/, '');
+  return fetch(parsed.origin + mediaBasePath + '/media/session', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
     body: JSON.stringify({ token: decodeURIComponent(match[1]) })
