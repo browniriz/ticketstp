@@ -451,15 +451,18 @@ function bridgeDeleteTicket_(number, sequence, dedupeKey) {
     var map = buildRowMap_(sh), row = map[number], deleted = false;
     if (row) { sh.deleteRow(row); deleted = true; }
     if (sequence > previousSequence) props.setProperty(sequenceKey, String(sequence));
+    // The row map is cached for an hour. Invalidate it before verifying the
+    // delete postcondition, otherwise a successfully deleted row looks present.
+    invalidateTicketCache_(); invalidateRowMap_();
     var ack = { number: number, sequence: sequence, dedupe_key: String(dedupeKey), deleted: deleted,
       absent: !buildRowMap_(sh)[number], current_sequence: Math.max(sequence, previousSequence) };
     props.setProperty(doneKey, JSON.stringify(ack));
-    invalidateTicketCache_(); invalidateRowMap_();
     return ack;
   } finally { lock.releaseLock(); }
 }
 
 function bridgeBatchUpsertTickets_(rows, sequences, dedupeKeys) {
+
   var seen = {};
   rows.forEach(function (row) {
     validateBridgeTicketRow_(row);

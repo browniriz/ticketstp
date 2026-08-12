@@ -225,6 +225,8 @@ def test_apps_script_bridge_and_role_revision_static_contract():
     assert "TICKETS_HEADERS" in pull and "getRange(2, 1, lastRow - 1, 18)" in pull
     assert "count: rows.length" in pull and "hash: hash" in pull
     assert "canonicalBridgeTicketRow_" in pull
+    delete = source[source.index("function bridgeDeleteTicket_"):source.index("function bridgeBatchUpsertTickets_")]
+    assert delete.index("invalidateTicketCache_(); invalidateRowMap_();") < delete.index("absent: !buildRowMap_(sh)[number]")
     mirror = source[source.index("function bridgeMirrorAccess_"):source.index("// Прогон проверки")]
     assert "bumpRolesRevision_();" not in mirror
     boundaries = (("upsertRole_", "function updateRoleContact_"),
