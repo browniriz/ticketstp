@@ -1,3 +1,16 @@
 .clasp.json
 .claspignore
 appsscript.json
+
+# Ticketsbot server local/runtime artifacts
+server/.venv/
+server/.pytest_cache/
+server/**/__pycache__/
+server/**/*.pyc
+server/.env
+server/.runtime-http/
+server/*.db
+server/*.db-*
+server/media/
+server/logs/
+server/backups/

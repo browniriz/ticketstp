@@ -84,3 +84,9 @@ Mini App для подачи и обработки заявок. Стек как
 - **Изменения Code.gs не применились** → нужен *новый* деплой, а не обновление существующего.
 - **Старая версия на Pages** → подожди деплой в Actions и обнови с `Ctrl+Shift+R`.
 - **Нет уведомлений в чате** → не заполнен `NOTIFY_CHAT_ID` или бот не в чате.
+
+## FastAPI server maintenance
+
+Альтернативный backend находится в `server/`. Зависимости воспроизводимо закреплены в `server/uv.lock`; используйте `uv sync --frozen`. Maintenance CLI поддерживает idempotent CSV import, двусторонний Sheets reconciliation через bridge action `bridgePullTickets`, coherent DB/media backup с SHA-256 manifest и fail-closed последовательные SQLite migrations с автоматическим pre-migration backup.
+
+Windows assets в `server/deploy/windows/` готовят окружение, отдельный NSSM API service на `127.0.0.1:8010`, отдельную worker task, logs и quiesced daily backups. Скрипты установки намеренно не запускаются автоматически. Подробности: [`server/OPERATIONS.md`](server/OPERATIONS.md).

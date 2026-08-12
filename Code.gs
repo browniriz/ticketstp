@@ -31,6 +31,8 @@
 //   NOTIFY_THREAD_ID    — тема форума (только супергруппа-форум). Пусто = общий поток.
 //   BOOTSTRAP_ADMIN_IDS — tg_id бутстрап-админов через запятую (для setup()).
 //   BOOTSTRAP_ADMIN_NAME— имя бутстрап-админа (необязательно).
+//   INIT_DATA_MAX_AGE_SECONDS — максимальный возраст Telegram initData (по умолчанию 86400 = 24ч).
+//   INIT_DATA_FUTURE_SKEW_SECONDS — допустимое опережение часов Telegram (по умолчанию 60с).
 
 function scriptProp_(key) {
   return PropertiesService.getScriptProperties().getProperty(key) || '';
@@ -42,6 +44,9 @@ var NOTIFY_CHAT_ID = scriptProp_('NOTIFY_CHAT_ID');
 var NOTIFY_THREAD_ID = scriptProp_('NOTIFY_THREAD_ID');
 var BOOTSTRAP_ADMIN_IDS = scriptProp_('BOOTSTRAP_ADMIN_IDS');
 var BOOTSTRAP_ADMIN_NAME = scriptProp_('BOOTSTRAP_ADMIN_NAME') || 'Администратор';
+var BRIDGE_SECRET = scriptProp_('BRIDGE_SECRET');
+var INIT_DATA_MAX_AGE_SECONDS = Number(scriptProp_('INIT_DATA_MAX_AGE_SECONDS') || 86400);
+var INIT_DATA_FUTURE_SKEW_SECONDS = Number(scriptProp_('INIT_DATA_FUTURE_SKEW_SECONDS') || 60);
 
 // Разовая настройка секретов. ВПИШИ значения, запусти один раз, затем ОЧИСТИ обратно
 // до пустых строк (Script properties уже сохранены и читаются из хранилища).
@@ -53,7 +58,10 @@ function setupSecrets() {
     NOTIFY_CHAT_ID: '',       // напр. -1002009555068
     NOTIFY_THREAD_ID: '',     // напр. 43695 (или пусто)
     BOOTSTRAP_ADMIN_IDS: '',  // напр. 339860192
-    BOOTSTRAP_ADMIN_NAME: ''  // напр. Администратор
+    BOOTSTRAP_ADMIN_NAME: '', // напр. Администратор
+    BRIDGE_SECRET: '',        // случайная строка минимум 32 символа; только server↔Sheets
+    INIT_DATA_MAX_AGE_SECONDS: '',    // напр. 86400 (24 часа); пусто = значение по умолчанию
+    INIT_DATA_FUTURE_SKEW_SECONDS: '' // напр. 60; пусто = значение по умолчанию
   };
   var props = PropertiesService.getScriptProperties();
   var written = [];
@@ -151,6 +159,15 @@ function doPost(e) {
     var action = body.action;
     var data;
 
+    // Server-to-Sheets bridge is routed before Telegram auth because it uses a
+    // separate high-entropy Script Property secret. Never send BRIDGE_SECRET to browsers.
+    if (String(action || '').indexOf('bridge') === 0) {
+      if (!bridgeSecretValid_(body.bridge_secret)) return json_({ success: false, error: 'unauthorized' });
+      bridgeRateLimit_();
+      data = bridgeRoute_(action, body);
+      return json_({ success: true, data: data });
+    }
+
     // Личность подтверждается подписью Telegram initData, а НЕ полем tg_id от клиента.
     // Любой запрос (кроме ping) обязан принести валидный init_data; доверенный id
     // перезаписывает body.tg_id, поэтому подделать чужой tg_id нельзя.
@@ -233,8 +250,7 @@ function rateLimit_(tgId, bucket, maxPerHour) {
 //   secret_key   = HMAC_SHA256(key='WebAppData', msg=BOT_TOKEN)
 //   check_hash   = HMAC_SHA256(key=secret_key, msg=data_check_string)  → hex
 // data_check_string — все поля кроме hash, отсортированы по ключу, склеены '\n' как key=value.
-// ВАЖНО: freshness по auth_date НЕ проверяем — Mini App переиспользует один initData
-// весь сеанс (включая опрос каждые 4с), и короткое окно ломало бы длинные сессии.
+// Подписанный auth_date также ограничен настраиваемым окном свежести (по умолчанию 24ч).
 function verifyInitData_(initData) {
   if (!BOT_TOKEN) throw userError_('Сервер не настроен: отсутствует BOT_TOKEN.');
   if (!initData) throw userError_('Откройте бота в официальном приложении Telegram.');
@@ -259,6 +275,17 @@ function verifyInitData_(initData) {
     throw userError_('Проверка подписи Telegram не пройдена.');
   }
 
+  var authDate = Number(data.auth_date);
+  var maxAge = INIT_DATA_MAX_AGE_SECONDS;
+  var futureSkew = INIT_DATA_FUTURE_SKEW_SECONDS;
+  if (!Number.isFinite(maxAge) || maxAge <= 0 || !Number.isFinite(futureSkew) || futureSkew < 0) {
+    throw userError_('Сервер неверно настроен: окно свежести Telegram.');
+  }
+  if (!Number.isInteger(authDate) || authDate <= 0) throw userError_('Некорректная дата авторизации Telegram.');
+  var nowSeconds = Math.floor(Date.now() / 1000);
+  if (authDate < nowSeconds - maxAge) throw userError_('Данные авторизации Telegram устарели. Откройте приложение заново.');
+  if (authDate > nowSeconds + futureSkew) throw userError_('Дата авторизации Telegram находится в будущем.');
+
   var user = {};
   try { user = JSON.parse(data.user || '{}'); } catch (e) {}
   if (!user || !user.id) throw userError_('В данных авторизации нет пользователя.');
@@ -278,6 +305,216 @@ function bytesToHex_(bytes) {
     out += (b < 16 ? '0' : '') + b.toString(16);
   }
   return out;
+}
+
+// Constant-time-ish comparison: always scans the maximum length.
+function bridgeSecretValid_(candidate) {
+  var a = String(BRIDGE_SECRET || ''), b = String(candidate || '');
+  if (!a || a.length < 32) return false;
+  var diff = a.length ^ b.length, n = Math.max(a.length, b.length);
+  for (var i = 0; i < n; i++) diff |= (a.charCodeAt(i % a.length) ^ b.charCodeAt(i % Math.max(1, b.length)));
+  return diff === 0;
+}
+
+function bridgeRateLimit_() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) throw new Error('bridge busy');
+  try {
+    var key = 'bridge_rl_' + Math.floor(Date.now() / 60000);
+    var props = PropertiesService.getScriptProperties();
+    var count = Number(props.getProperty(key) || 0);
+    if (count >= 300) throw new Error('bridge rate limit');
+    props.setProperty(key, String(count + 1));
+    props.deleteProperty('bridge_rl_' + (Math.floor(Date.now() / 60000) - 2));
+  } finally { lock.releaseLock(); }
+}
+
+function bridgeRoute_(action, body) {
+  if (action === 'bridgePullRoles') return bridgeRolesSnapshot_();
+  if (action === 'bridgePullTickets') return bridgeTicketsSnapshot_();
+  if (action === 'bridgeUpsertTicket') return bridgeUpsertTicket_(body.row, body.dedupe_key);
+  if (action === 'bridgeBatchUpsertTickets') {
+    if (!Array.isArray(body.rows) || body.rows.length > 200) throw new Error('invalid batch');
+    return bridgeBatchUpsertTickets_(body.rows, body.dedupe_keys || []);
+  }
+  if (action === 'bridgeMirrorAccess') return bridgeMirrorAccess_(body);
+  throw new Error('unknown bridge action');
+}
+
+function bridgeTicketsSnapshot_() {
+  var sh = ensureSheet_(getSpreadsheet_(), SHEET_TICKETS, TICKETS_HEADERS);
+  var lastRow = sh.getLastRow();
+  // Never silently reconcile against a partial snapshot: reject oversized sheets.
+  if (lastRow > 5001) throw new Error('ticket snapshot too large');
+  var rows = lastRow < 2 ? [] : sh.getRange(2, 1, lastRow - 1, 18).getValues();
+  rows = rows.filter(function (row) { return String(row[0] || '').trim() !== ''; })
+    .map(function (row) { return canonicalBridgeTicketRow_(normalizeTicketDateCells_(row.slice())); });
+  var canonical = JSON.stringify({ headers: TICKETS_HEADERS, rows: rows });
+  var hash = bytesToHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, canonical, Utilities.Charset.UTF_8));
+  return { headers: TICKETS_HEADERS, rows: rows, count: rows.length, hash: hash };
+}
+
+function bridgeRolesSnapshot_() {
+  var rows = readRoleRows_();
+  var canonical = JSON.stringify({ headers: ROLES_HEADERS, rows: rows });
+  var hash = bytesToHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, canonical, Utilities.Charset.UTF_8));
+  var revision = Number(PropertiesService.getScriptProperties().getProperty('BRIDGE_ROLES_REVISION') || 1);
+  return { headers: ROLES_HEADERS, rows: rows, revision: revision, hash: hash, count: rows.length };
+}
+
+function bumpRolesRevision_() {
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty('BRIDGE_ROLES_REVISION', String(Number(props.getProperty('BRIDGE_ROLES_REVISION') || 1) + 1));
+}
+
+function plainText_(value) {
+  if (value == null) return '';
+  var text = String(value);
+  // One reversible Sheets escape also preserves legitimate leading apostrophes:
+  // "=text" -> "'=text", while "'=text" -> "''=text".
+  return /^[']*[\s\u0000-\u001f]*[=+\-@]/.test(text) ? "'" + text : text;
+}
+
+var BRIDGE_TICKET_TEXT_COLUMNS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 17];
+
+function sanitizeBridgeTicketRow_(row) {
+  BRIDGE_TICKET_TEXT_COLUMNS.forEach(function (i) { row[i] = plainText_(row[i]); });
+  return row;
+}
+
+function canonicalBridgeTicketRow_(row) {
+  BRIDGE_TICKET_TEXT_COLUMNS.forEach(function (i) {
+    var text = String(row[i] == null ? '' : row[i]);
+    // Decode exactly one escape inserted by plainText_; further quotes are data.
+    if (/^'[']*[\s\u0000-\u001f]*[=+\-@]/.test(text)) row[i] = text.slice(1);
+  });
+  return row;
+}
+
+function bridgeStateKey_(prefix, value) {
+  if (!/^[A-Za-z0-9:._-]{1,160}$/.test(String(value || ''))) throw new Error('invalid bridge key');
+  var digest = bytesToHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(value), Utilities.Charset.UTF_8));
+  return prefix + digest;
+}
+
+function validateBridgeTicketRow_(row) {
+  if (!Array.isArray(row) || row.length !== 18 || !/^[A-Z][0-9]{3}$/.test(String(row[0] || ''))) throw new Error('invalid ticket row');
+  for (var i = 0; i < row.length; i++) if (String(row[i] == null ? '' : row[i]).length > 20000) throw new Error('cell too large');
+  if (row[12] && !/^\d+:[0-5]\d$/.test(String(row[12]))) throw new Error('invalid elapsed duration');
+  if (row[15] && !/^\d+:[0-5]\d$/.test(String(row[15]))) throw new Error('invalid idle duration');
+}
+
+function bridgeUpsertTicket_(row, dedupeKey) {
+  validateBridgeTicketRow_(row);
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) throw new Error('bridge busy');
+  try {
+    var desired = normalizeTicketDateCells_(row.slice());
+    var props = PropertiesService.getScriptProperties(), doneKey = bridgeStateKey_('bridge_done_', dedupeKey);
+    var previous = props.getProperty(doneKey);
+    var sh = ensureSheet_(getSpreadsheet_(), SHEET_TICKETS, TICKETS_HEADERS);
+    var map = buildRowMap_(sh), existingIndex = map[String(desired[0])];
+    if (previous && existingIndex) {
+      var existing = canonicalBridgeTicketRow_(normalizeTicketDateCells_(sh.getRange(existingIndex, 1, 1, 18).getValues()[0]));
+      if (JSON.stringify(existing) === JSON.stringify(desired)) return JSON.parse(previous);
+    }
+    row = sanitizeBridgeTicketRow_(desired.slice());
+    var index = existingIndex || nextTicketRow_(sh);
+    sh.getRange(index, 1, 1, 18).setValues([row]);
+    invalidateTicketCache_(); invalidateRowMap_();
+    var ack = { number: String(row[0]), row: index, dedupe_key: String(dedupeKey) };
+    props.setProperty(doneKey, JSON.stringify(ack));
+    return ack;
+  } finally { lock.releaseLock(); }
+}
+
+function bridgeBatchUpsertTickets_(rows, dedupeKeys) {
+  var seen = {};
+  rows.forEach(function (row) {
+    validateBridgeTicketRow_(row);
+    if (seen[String(row[0])]) throw new Error('duplicate ticket in batch');
+    seen[String(row[0])] = true;
+  });
+  if (dedupeKeys.length !== rows.length) throw new Error('invalid batch dedupe keys');
+  if (!rows.length) return { upserted: 0, acknowledgments: [] };
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) throw new Error('bridge busy');
+  try {
+    var props = PropertiesService.getScriptProperties(), pending = [], acknowledgments = [];
+    var sh = ensureSheet_(getSpreadsheet_(), SHEET_TICKETS, TICKETS_HEADERS);
+    var map = buildRowMap_(sh);
+    rows.forEach(function (row, i) {
+      var key = bridgeStateKey_('bridge_done_', dedupeKeys[i]), prior = props.getProperty(key);
+      var desired = normalizeTicketDateCells_(row.slice());
+      var existingIndex = map[String(desired[0])], currentMatches = false;
+      if (prior && existingIndex) {
+        var current = canonicalBridgeTicketRow_(normalizeTicketDateCells_(sh.getRange(existingIndex, 1, 1, 18).getValues()[0]));
+        currentMatches = JSON.stringify(current) === JSON.stringify(desired);
+      }
+      if (prior && currentMatches) acknowledgments.push(JSON.parse(prior));
+      else pending.push({ row: sanitizeBridgeTicketRow_(desired.slice()), key: key, dedupe: String(dedupeKeys[i]) });
+    });
+    var next = nextTicketRow_(sh);
+    pending.forEach(function (item) {
+      item.index = map[String(item.row[0])] || next++;
+      map[String(item.row[0])] = item.index;
+    });
+    pending.sort(function (a, b) { return a.index - b.index; });
+    for (var start = 0; start < pending.length;) {
+      var end = start + 1;
+      while (end < pending.length && pending[end].index === pending[end - 1].index + 1) end++;
+      sh.getRange(pending[start].index, 1, end - start, 18).setValues(pending.slice(start, end).map(function (x) { return x.row; }));
+      start = end;
+    }
+    pending.forEach(function (item) {
+      var ack = { number: String(item.row[0]), row: item.index, dedupe_key: item.dedupe };
+      props.setProperty(item.key, JSON.stringify(ack)); acknowledgments.push(ack);
+    });
+    invalidateTicketCache_(); invalidateRowMap_();
+    acknowledgments.sort(function (a, b) { return String(a.dedupe_key).localeCompare(String(b.dedupe_key)); });
+    return { upserted: pending.length, acknowledgments: acknowledgments };
+  } finally { lock.releaseLock(); }
+}
+
+function bridgeMirrorAccess_(body) {
+  var payload = body.payload || {}, id = String(payload.tg_id || payload.creator_id || '');
+  if (!/^\d{1,32}$/.test(id)) throw new Error('invalid access payload');
+  var sequence = Number(payload.sequence), operation = String(body.operation || '');
+  if (!Number.isInteger(sequence) || sequence < 1) throw new Error('invalid access sequence');
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) throw new Error('bridge busy');
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var doneKey = bridgeStateKey_('bridge_done_', body.dedupe_key);
+    var priorAck = props.getProperty(doneKey);
+    if (priorAck) return JSON.parse(priorAck);
+    var sequenceKey = bridgeStateKey_('bridge_seq_', id), previousSequence = Number(props.getProperty(sequenceKey) || 0);
+    if (sequence <= previousSequence) throw new Error('stale access sequence');
+    if (operation === 'request') {
+      upsertRequest_(id, plainText_(String(payload.name || '').slice(0, 80)), plainText_(String(payload.username || '').slice(0, 64)), plainText_(String(payload.photo_url || '').slice(0, 1000)));
+    } else if (operation === 'reject') {
+      removeRequest_(id);
+    } else if (operation === 'approve') {
+      upsertRole_(id, plainText_(String(payload.name || '').slice(0, 80)), 'сотрудник', plainText_(String(payload.username || '').slice(0, 64)), plainText_(String(payload.photo_url || '').slice(0, 1000)));
+      removeRequest_(id);
+    } else if (operation === 'rename') {
+      var current = getRoleRaw_(id);
+      if (current.role === 'гость') throw new Error('role not found');
+      upsertRole_(id, plainText_(String(payload.name || '').slice(0, 80)), current.role);
+    } else if (operation === 'refresh_contact') {
+      updateRoleContact_(id, plainText_(String(payload.username || '').slice(0, 64)), plainText_(String(payload.photo_url || '').slice(0, 1000)));
+    } else if (operation === 'revoke' || operation === 'delete') {
+      var target = getRoleRaw_(id);
+      if (target.role === 'админ' && readRoleRows_().filter(function (r) { return String(r[2]) === 'админ'; }).length <= 1) throw new Error('cannot delete last admin');
+      removeRole_(id); removeRequest_(id);
+    } else {
+      throw new Error('invalid access operation');
+    }
+    props.setProperty(sequenceKey, String(sequence));
+    var ack = { tg_id: id, operation: operation, sequence: sequence, dedupe_key: String(body.dedupe_key) };
+    props.setProperty(doneKey, JSON.stringify(ack));
+    return ack;
+  } finally { lock.releaseLock(); }
 }
 
 // Прогон проверки на реальном initData. Вставь строку из window.Telegram.WebApp.initData
@@ -725,22 +962,27 @@ function assertTicketTypeAllowed_(tgId, type) {
 }
 
 function upsertRole_(tgId, name, role, username, photo) {
+  name = plainText_(name); username = plainText_(username); photo = plainText_(photo);
   var sh = sheet_(SHEET_ROLES);
   var rows = sh.getDataRange().getValues();
+  var updated = false;
   for (var i = 1; i < rows.length; i++) {
     if (String(rows[i][0]) === String(tgId)) {
       // Контакты не затираем пустыми — сохраняем прежние, если новые не переданы.
       var u = (username != null && username !== '') ? username : (rows[i][3] || '');
       var p = (photo != null && photo !== '') ? photo : (rows[i][4] || '');
       sh.getRange(i + 1, 1, 1, 5).setValues([[tgId, name, role, u, p]]);
-      CacheService.getScriptCache().remove(CACHE_KEY_ROLES);
-      return;
+      updated = true;
+      break;
     }
   }
-  var newRow = [tgId, name, role, username || '', photo || '']
-    .concat(defaultRoleTypeFlags_(role, tgId, false));
-  sh.appendRow(newRow);
+  if (!updated) {
+    var newRow = [tgId, name, role, username || '', photo || '']
+      .concat(defaultRoleTypeFlags_(role, tgId, false));
+    sh.appendRow(newRow);
+  }
   CacheService.getScriptCache().remove(CACHE_KEY_ROLES);
+  bumpRolesRevision_();
 }
 
 // Обновить только контакты сотрудника (username/photo) — бэкфилл при открытии приложения.
@@ -754,6 +996,7 @@ function updateRoleContact_(tgId, username, photo) {
       if (String(rows[i][3] || '') === String(u) && String(rows[i][4] || '') === String(p)) return false;
       sh.getRange(i + 1, 4, 1, 2).setValues([[u, p]]);
       CacheService.getScriptCache().remove(CACHE_KEY_ROLES);
+      bumpRolesRevision_();
       return true;
     }
   }
@@ -797,7 +1040,8 @@ function createTicket_(body) {
     fileUrl,         // 16 Файл
     ''               // 17 основание
   ];
-  // Пишем сразу после последней строки С НОМЕРОМ (столбец A), а не после
+  sanitizeBridgeTicketRow_(row);
+  // Пишем сразу
   // getLastRow() — иначе посторонний контент в дальних ячейках уводит запись вниз.
   sh.getRange(nextTicketRow_(sh), 1, 1, row.length).setValues([row]);
   updateTicketCachesAfterWrite_(row);
@@ -1309,6 +1553,10 @@ function revokeAccess_(body) {
   requireAdmin_(body);
   var tgId = String(body.target_tg_id || '');
   if (!tgId) throw userError_('Не выбран сотрудник.');
+  var target = getRoleRaw_(tgId);
+  if (target.role === 'админ' && readRoleRows_().filter(function (r) {
+    return String(r[2]) === 'админ';
+  }).length <= 1) throw userError_('Нельзя закрыть доступ последнему администратору.');
   removeRole_(tgId);
   removeRequest_(tgId);
   notifyUser_(tgId, '⛔ Доступ к боту закрыт администратором.');
@@ -1320,10 +1568,13 @@ function revokeAccess_(body) {
 function removeRole_(tgId) {
   var sh = sheet_(SHEET_ROLES);
   var rows = sh.getDataRange().getValues();
+  var removed = false;
   for (var i = rows.length - 1; i >= 1; i--) {
-    if (String(rows[i][0]) === String(tgId)) sh.deleteRow(i + 1);
+    if (String(rows[i][0]) === String(tgId)) { sh.deleteRow(i + 1); removed = true; }
   }
   CacheService.getScriptCache().remove(CACHE_KEY_ROLES);
+  if (removed) bumpRolesRevision_();
+  return removed;
 }
 
 // Ручные изменения в Google Таблице сразу сбрасывают соответствующий кэш.
@@ -1333,6 +1584,7 @@ function onEdit(e) {
     var sheetName = e.range.getSheet().getName();
     if (sheetName === SHEET_ROLES) {
       CacheService.getScriptCache().remove(CACHE_KEY_ROLES);
+      bumpRolesRevision_();
     } else if (sheetName === SHEET_TICKETS) {
       invalidateTicketCache_();
       invalidateRowMap_();
@@ -1612,6 +1864,7 @@ function normalizeTicketDateCells_(row) {
 
 function writeRow_(sh, rowIdx, row) {
   normalizeTicketDateCells_(row);
+  sanitizeBridgeTicketRow_(row);
   sh.getRange(rowIdx, 1, 1, TICKETS_HEADERS.length).setValues([row]);
   updateTicketCachesAfterWrite_(row);
 }

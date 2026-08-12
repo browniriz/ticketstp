@@ -648,6 +648,35 @@ function api(action, payload) {
   });
 }
 
+// Obtain a short-lived attachment URL without ever placing Telegram initData in a URL.
+function secureMediaUrl(url) {
+  if (!/^https?:\/\//i.test(url)) return Promise.reject(new Error('Некорректная ссылка'));
+  var parsed;
+  try { parsed = new URL(url); } catch (e) { return Promise.reject(e); }
+  var match = parsed.pathname.match(/\/media\/([^/]+)$/);
+  if (!match) return Promise.resolve(url); // External/legacy (for example Google Drive).
+  return fetch(parsed.origin + '/media/session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': (tg && tg.initData) || '' },
+    body: JSON.stringify({ token: decodeURIComponent(match[1]) })
+  }).then(function (r) {
+    if (!r.ok) throw new Error('Нет доступа к вложению.');
+    return r.json();
+  }).then(function (data) {
+    if (!data || !/^https?:\/\//i.test(data.url) || /(?:[?&])init_data=/i.test(data.url)) {
+      throw new Error('Сервер вернул некорректную ссылку.');
+    }
+    return data.url;
+  });
+}
+function openSecureFile(url) {
+  secureMediaUrl(url).then(function (signedUrl) {
+    var w = window.open(signedUrl, '_blank', 'noopener');
+    if (!w && tg && tg.openLink) tg.openLink(signedUrl);
+  }).catch(function (e) { toast(e.message, true); });
+  return false;
+}
+
 // ============================ THEME ============================
 var themeInited = false;
 function initTheme() {
@@ -1502,13 +1531,14 @@ function fileHTML(t) {
   // Рендерим только http(s)-ссылки — защита от javascript:/data: при ручной правке таблицы.
   if (!/^https?:\/\//i.test(t.fileUrl)) return '';
   var id = driveId(t.fileUrl);
-  var thumb = id ? 'https://drive.google.com/thumbnail?id=' + id + '&sz=w1000' : t.fileUrl;
+  var isProtected = /\/media\/[^/?]+(?:\?|$)/.test(t.fileUrl);
+  var thumb = id ? 'https://drive.google.com/thumbnail?id=' + id + '&sz=w1000' : (isProtected ? '' : t.fileUrl);
   var full  = id ? 'https://drive.google.com/thumbnail?id=' + id + '&sz=w2000' : t.fileUrl;
   return '<div class="shot-wrap">' +
-    '<img class="shot clickable" src="' + esc(thumb) + '" alt="вложение" ' +
+    (thumb ? '<img class="shot clickable" src="' + esc(thumb) + '" alt="вложение" ' +
       'data-full="' + esc(full) + '" onclick="openLightbox(this.dataset.full)" ' +
-      'onerror="this.style.display=\'none\'" />' +
-    '<a class="file-chip" href="' + esc(t.fileUrl) + '" target="_blank" rel="noopener">' +
+      'onerror="this.style.display=\'none\'" />' : '') +
+    '<a class="file-chip" href="#" data-url="' + esc(t.fileUrl) + '" onclick="return openSecureFile(this.dataset.url)">' +
       '<span class="ico">📎</span><span class="nm">Открыть файл</span></a>' +
     '</div>';
 }
@@ -1705,7 +1735,7 @@ function renderRevisionView(t, cls) {
       '<input type="file" id="rev-image" hidden onchange="onRevisionFile()" />' +
       '<div id="revImgPreview"></div></div>' +
     (t.fileUrl ? '<div style="margin:-6px 2px 12px;font-size:12px;color:var(--muted)">Уже прикреплён файл — ' +
-        '<a href="' + esc(t.fileUrl) + '" target="_blank" rel="noopener" style="color:var(--accent)">открыть</a>. Новый заменит его.</div>' : '') +
+        '<a href="#" data-url="' + esc(t.fileUrl) + '" onclick="return openSecureFile(this.dataset.url)" style="color:var(--accent)">открыть</a>. Новый заменит его.</div>' : '') +
     '<div class="actions">' +
       '<button class="btn btn-take" id="resubmitBtn" data-no="' + esc(t.number) + '" onclick="doResubmit(this.dataset.no)">Отправить снова</button>' +
     '</div>';
@@ -1855,6 +1885,10 @@ function toast(msg, isErr) {
 
 // ============================ LIGHTBOX ============================
 function openLightbox(url) {
+  if (/\/media\/[^/?]+(?:\?|$)/.test(url)) {
+    secureMediaUrl(url).then(openLightbox).catch(function (e) { toast(e.message, true); });
+    return;
+  }
   var img = document.getElementById('lightboxImg');
   img.src = url;
   document.getElementById('lightbox').classList.add('open');
