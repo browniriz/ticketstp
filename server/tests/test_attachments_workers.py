@@ -2,7 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -116,8 +116,13 @@ async def test_worker_retry_backoff_and_terminal_failure_visible(app,client):
     async with app.state.db.session() as s:
         row=(await s.execute(select(NotificationOutbox))).scalar_one()
         assert not row.delivered and row.attempts==1
-        assert row.next_attempt_at.replace(tzinfo=timezone.utc)>datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        retry_at = row.next_attempt_at.replace(tzinfo=timezone.utc)
+        assert retry_at >= now + timedelta(seconds=25)
         assert 'permanently failed after 1 attempts' in row.last_error
+    assert WorkerManager(app.state.db, app.state.settings, bridge=FakeBridge()).bridge is not None
+    from ticketsbot.workers import BridgeClient
+    assert BridgeClient.REQUEST_TIMEOUT_SECONDS == 120
 
 
 class MismatchedAckBridge(FakeBridge):

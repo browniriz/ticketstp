@@ -62,6 +62,7 @@ class TelegramClient:
 
 class BridgeClient:
     ALLOWED_HOSTS = {"script.google.com", "script.googleusercontent.com"}
+    REQUEST_TIMEOUT_SECONDS = 120
 
     def __init__(self, url: str, secret: str):
         parsed = urlparse(url)
@@ -72,7 +73,7 @@ class BridgeClient:
 
     async def call(self, action: str, **payload):
         body = {"action": action, "bridge_secret": self.secret, **payload}
-        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=self.REQUEST_TIMEOUT_SECONDS, follow_redirects=False) as client:
             response = await client.post(self.url, json=body)
             if response.is_redirect:
                 location = response.headers.get("location", "")
@@ -222,7 +223,7 @@ class WorkerManager:
         if row.attempts >= self.settings.worker_max_attempts:
             message = f"permanently failed after {row.attempts} attempts: {message}"
         row.last_error = message[:2000]
-        row.next_attempt_at = utcnow() + timedelta(seconds=min(3600, 2 ** min(row.attempts, 11)))
+        row.next_attempt_at = utcnow() + timedelta(seconds=min(3600, max(30, 2 ** min(row.attempts, 11))))
 
     async def pull_roles_once(self):
         data = await self.bridge.call("bridgePullRoles")
