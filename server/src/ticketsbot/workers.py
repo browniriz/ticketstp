@@ -103,7 +103,6 @@ class WorkerManager:
         if self.telegram: self.tasks.append(asyncio.create_task(self._loop(self.notifications_once), name="notification-outbox"))
         if self.bridge:
             self.tasks.append(asyncio.create_task(self._loop(self.sheets_once), name="sheet-outbox"))
-            self.tasks.append(asyncio.create_task(self._roles_loop(), name="roles-pull"))
 
     async def close(self):
         self.stop.set()

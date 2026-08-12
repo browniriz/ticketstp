@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import unicodedata
 from datetime import timezone
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import delete, func, or_, select
+from sqlalchemy.dialects.sqlite import insert
 
 from .admin_auth import (COOKIE_NAME, clear_login_failures, login_allowed, make_cookie,
                          new_session, record_login_failure, require_admin_origin,
                          require_admin_session, require_admin_state_change, verify_password)
-from .models import (AdminAudit, AdminSession, Attachment, SheetSyncOutbox, Ticket,
-                     TicketEvent, utcnow)
+from .models import (AccessRequest, AdminAudit, AdminSession, Attachment, Role,
+                     SheetSyncOutbox, Ticket, TicketEvent, utcnow)
 from .services.admin import archive_ticket, delete_ticket
+from .services.access import _sheet_access
 
 router = APIRouter(prefix="/admin/api", tags=["admin"])
 
@@ -23,6 +28,27 @@ class LoginBody(BaseModel):
 
 class DeleteBody(BaseModel):
     confirm_number: str = Field(max_length=32)
+
+
+class AddEmployeeBody(BaseModel):
+    tg_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("tg_id")
+    @classmethod
+    def valid_telegram_user_id(cls, value: str) -> str:
+        if int(value) > (2 ** 52 - 1):
+            raise ValueError("Telegram ID is outside the supported range")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def valid_employee_name(cls, value: str) -> str:
+        value = unicodedata.normalize("NFKC", value).strip()
+        if (not value or len(value) > 80
+                or any(unicodedata.category(char).startswith("C") for char in value)):
+            raise ValueError("Employee name contains unsupported characters")
+        return value
 
 
 def value(value):
@@ -99,6 +125,52 @@ async def tickets(request: Request, q: str = "", status: str = "", type: str = "
             *filters).group_by(Ticket.status))).all()
     return {"items": [model_dict(row) for row in rows], "total": total, "page": page,
             "page_size": page_size, "summary": {key: count for key, count in summary_rows}}
+
+
+@router.get("/access")
+async def access_list(request: Request, q: str = "", page: int = 1, page_size: int = 50,
+                      _admin: AdminSession = Depends(require_admin_session)):
+    page, page_size = max(1, page), min(100, max(1, page_size))
+    filters = []
+    query = q.strip()[:200]
+    if query:
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        term = f"%{escaped}%"
+        filters.append(or_(Role.name.ilike(term, escape="\\"), Role.username.ilike(term, escape="\\"),
+                           Role.tg_id.ilike(term, escape="\\")))
+    async with request.app.state.db.session() as session:
+        total = int((await session.execute(select(func.count(Role.tg_id)).where(*filters))).scalar_one())
+        rows = list((await session.execute(select(Role).where(*filters).order_by(
+            Role.name.asc(), Role.tg_id.asc()).offset((page - 1) * page_size).limit(page_size))).scalars())
+    return {"items": [{"tg_id": row.tg_id, "name": row.name, "role": row.role,
+                       "username": row.username} for row in rows],
+            "total": total, "page": page, "page_size": page_size}
+
+
+@router.post("/access", status_code=201)
+async def add_employee(body: AddEmployeeBody, request: Request,
+                       admin: AdminSession = Depends(require_admin_state_change)):
+    tg_id, name = body.tg_id, body.name
+    async with request.app.state.db.session() as session:
+        inserted = (await session.execute(insert(Role).values(
+            tg_id=tg_id, name=name, role="сотрудник", username="", photo_url="",
+            allowed_types_json=None,
+        ).on_conflict_do_nothing(index_elements=[Role.tg_id]).returning(Role.tg_id))).scalar_one_or_none()
+        if inserted is None:
+            await session.rollback()
+            raise HTTPException(409, "Access already exists")
+        await session.execute(delete(AccessRequest).where(AccessRequest.tg_id == tg_id))
+        event_key = f"role:{tg_id}:admin-approve:{uuid4().hex}"
+        await _sheet_access(session, event_key, "role", tg_id, "approve", {
+            "tg_id": tg_id, "name": name, "role": "сотрудник", "username": "", "photo_url": "",
+        })
+        session.add(AdminAudit(session_id=admin.id, action="add_employee_access",
+                               payload_json=json.dumps({"tg_id": tg_id, "name": name,
+                                                        "role": "сотрудник"},
+                                                       ensure_ascii=False, separators=(",", ":"))))
+        await session.commit()
+    return {"employee": {"tg_id": tg_id, "name": name, "role": "сотрудник", "username": ""},
+            "google_pending": True}
 
 
 @router.get("/tickets/{number}")

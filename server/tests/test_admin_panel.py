@@ -12,7 +12,7 @@ from sqlalchemy import select
 from ticketsbot.app import create_app
 from ticketsbot.config import Settings
 from ticketsbot.models import (AdminAudit, AdminSession, Attachment, BridgeSequence,
-                               NotificationOutbox, SheetSyncOutbox, Ticket, TicketEvent,
+                               NotificationOutbox, Role, SheetSyncOutbox, Ticket, TicketEvent,
                                TicketTombstone, utcnow)
 from ticketsbot.workers import WorkerManager
 
@@ -64,6 +64,8 @@ def test_admin_panel_static_route_is_hardened(admin_client):
     assert response.headers["x-content-type-options"] == "nosniff"
     assert '<html lang="ru">' in response.text
     assert 'const API = "/admin/api"' in response.text and 'API+"/session"' in response.text
+    assert 'id="accessTab"' in response.text and 'id="addAccessForm"' in response.text
+    assert 'api("/access"' in response.text and 'loadAccess()' in response.text
     assert "localStorage" not in response.text
 
 
@@ -194,6 +196,57 @@ async def test_read_only_list_detail_events_and_outbox(admin_app):
         assert detail["ticket"]["number"] == "A001"
         assert detail["events"][0]["event"] == "created"
         assert detail["outbox"][0]["operation"] == "upsert"
+
+
+@pytest.mark.asyncio
+async def test_access_list_search_and_add_employee_are_audited(admin_app):
+    await admin_app.state.db.initialize()
+    async with admin_app.state.db.session() as session:
+        session.add_all([
+            Role(tg_id="100", name="Анна Админ", role="админ", username="anna"),
+            Role(tg_id="200", name="Борис", role="сотрудник", username="boris"),
+        ])
+        await session.commit()
+    with TestClient(admin_app, base_url="https://testserver") as client:
+        csrf = login(client).json()["csrf_token"]
+        listed = client.get("/admin/api/access")
+        assert listed.status_code == 200
+        assert listed.json()["total"] == 2
+        assert {item["role"] for item in listed.json()["items"]} == {"админ", "сотрудник"}
+        assert client.get("/admin/api/access", params={"q": "200"}).json()["items"][0]["name"] == "Борис"
+        assert client.get("/admin/api/access", params={"q": "ANNA"}).json()["items"][0]["tg_id"] == "100"
+        assert client.get("/admin/api/access", params={"q": "%"}).json()["total"] == 0
+        created = client.post("/admin/api/access", json={"tg_id": "300", "name": "Светлана"},
+                              headers=csrf_headers(csrf))
+        assert created.status_code == 201
+        assert created.json()["employee"] == {"tg_id": "300", "name": "Светлана",
+                                                "role": "сотрудник", "username": ""}
+        assert created.json()["google_pending"] is True
+        assert client.post("/admin/api/access", json={"tg_id": "300", "name": "Дубликат"},
+                           headers=csrf_headers(csrf)).status_code == 409
+    async with admin_app.state.db.session() as session:
+        role = await session.get(Role, "300")
+        assert role is not None and role.role == "сотрудник" and role.name == "Светлана"
+        outbox = (await session.execute(select(SheetSyncOutbox).where(
+            SheetSyncOutbox.entity_type == "role", SheetSyncOutbox.entity_id == "300"))).scalar_one()
+        assert outbox.operation == "approve"
+        assert json.loads(outbox.payload_json)["role"] == "сотрудник"
+        audit = (await session.execute(select(AdminAudit).where(
+            AdminAudit.action == "add_employee_access"))).scalar_one()
+        assert json.loads(audit.payload_json) == {"tg_id": "300", "name": "Светлана",
+                                                  "role": "сотрудник"}
+
+
+def test_add_employee_access_requires_csrf_and_valid_fields(admin_client):
+    csrf = login(admin_client).json()["csrf_token"]
+    assert admin_client.post("/admin/api/access", json={"tg_id": "123", "name": "Иван"}).status_code == 403
+    for body in ({"tg_id": "abc", "name": "Иван"}, {"tg_id": "0", "name": "Иван"},
+                 {"tg_id": "123", "name": ""}, {"tg_id": str(2 ** 52), "name": "Иван"},
+                 {"tg_id": "123", "name": "Иван\u202e"}, {"tg_id": "123", "name": "Иван\nПетров"}):
+        assert admin_client.post("/admin/api/access", json=body,
+                                 headers=csrf_headers(csrf)).status_code == 422
+    assert admin_client.post("/admin/api/access", json={"tg_id": "123", "name": "ﷺ" * 80},
+                             headers=csrf_headers(csrf)).status_code == 422
 
 
 @pytest.mark.asyncio

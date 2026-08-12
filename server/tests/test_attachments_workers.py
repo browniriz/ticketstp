@@ -81,6 +81,18 @@ class FakeBridge:
 
 
 @pytest.mark.asyncio
+async def test_worker_start_does_not_pull_roles_from_google(app):
+    worker = WorkerManager(app.state.db, app.state.settings, bridge=FakeBridge())
+    worker.start()
+    try:
+        names = {task.get_name() for task in worker.tasks}
+        assert "roles-pull" not in names
+        assert "sheet-outbox" in names
+    finally:
+        await worker.close()
+
+
+@pytest.mark.asyncio
 async def test_injectable_workers_delivery_roles_and_exact_columns(app,client):
     await add_role(app,1,'Иван')
     call(client,'createTicket',1,**BASE)
