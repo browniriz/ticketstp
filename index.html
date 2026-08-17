@@ -188,9 +188,19 @@
     position: relative; width: 100%; max-width: 560px; background: var(--bg-soft);
     border-radius: 22px 22px 0 0; padding: 8px 18px 26px;
     max-height: 90vh; overflow-y: auto; animation: slideup .3s var(--ease);
+    will-change: transform;
   }
   @keyframes slideup { from { transform: translateY(100%); } to { transform: none; } }
-  .grabber { width: 40px; height: 4px; border-radius: 999px; background: var(--line); margin: 6px auto 14px; }
+  .grabber {
+    position: relative; width: 100%; height: 28px; margin: -2px 0 2px;
+    cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none;
+  }
+  .grabber::after {
+    content: ''; position: absolute; top: 8px; left: 50%;
+    width: 52px; height: 5px; transform: translateX(-50%);
+    border-radius: 999px; background: var(--line);
+  }
+  .grabber.dragging { cursor: grabbing; }
   .sheet-close {
     position: absolute; top: 8px; right: 10px; z-index: 2;
     width: 36px; height: 36px; padding: 0; border: 1px solid var(--line);
@@ -484,7 +494,7 @@
 <div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-label="Карточка заявки">
   <div class="sheet" id="sheet">
     <button class="sheet-close" type="button" onclick="closeDetail()" aria-label="Закрыть карточку">✕</button>
-    <div class="grabber"></div><div id="detailBody"></div>
+    <div class="grabber" id="sheetGrabber" aria-label="Потяните вниз, чтобы закрыть заявку"></div><div id="detailBody"></div>
   </div>
 </div>
 
@@ -1450,6 +1460,7 @@ function toggleLbRow(tgId) {
 
 // ============================ DETAIL ============================
 function openDetail(no) {
+  resetSheetDragStyles();
   openTicketNo = no;
   var t = ticketCache[no];
   if (!t) return;
@@ -1459,9 +1470,134 @@ function openDetail(no) {
 }
 
 function closeDetail() {
+  resetSheetDragStyles();
   openTicketNo = null;
   document.getElementById('overlay').classList.remove('open');
   document.documentElement.classList.remove('detail-open');
+}
+
+// ============================ DETAIL SWIPE TO CLOSE ============================
+var sheetDrag = {
+  active: false, startY: 0, lastY: 0, lastTime: 0, velocity: 0, closeTimer: null
+};
+
+function resetSheetDragStyles() {
+  if (sheetDrag.closeTimer) {
+    clearTimeout(sheetDrag.closeTimer);
+    sheetDrag.closeTimer = null;
+  }
+  sheetDrag.active = false;
+  var sheet = document.getElementById('sheet');
+  var overlay = document.getElementById('overlay');
+  var grabber = document.getElementById('sheetGrabber');
+  if (sheet) { sheet.style.transition = ''; sheet.style.transform = ''; sheet.style.animation = ''; }
+  if (overlay) {
+    overlay.style.transition = '';
+    overlay.style.backgroundColor = '';
+    overlay.style.backdropFilter = '';
+    overlay.style.webkitBackdropFilter = '';
+  }
+  if (grabber) grabber.classList.remove('dragging');
+}
+
+function sheetTouchY(e) {
+  var list = e.touches && e.touches.length ? e.touches : e.changedTouches;
+  if (list && list.length) return list[0].clientY;
+  return typeof e.clientY === 'number' ? e.clientY : null;
+}
+
+function onSheetDragStart(e) {
+  if (!document.getElementById('overlay').classList.contains('open')) return;
+  if (e.type === 'mousedown' && e.button !== 0) return;
+  var y = sheetTouchY(e);
+  if (y == null) return;
+  if (sheetDrag.closeTimer) {
+    clearTimeout(sheetDrag.closeTimer);
+    sheetDrag.closeTimer = null;
+  }
+  var now = Date.now();
+  sheetDrag.active = true;
+  sheetDrag.startY = sheetDrag.lastY = y;
+  sheetDrag.lastTime = now;
+  sheetDrag.velocity = 0;
+  document.getElementById('sheet').style.transition = 'none';
+  document.getElementById('sheet').style.animation = 'none';
+  document.getElementById('overlay').style.transition = 'none';
+  document.getElementById('sheetGrabber').classList.add('dragging');
+}
+
+function onSheetDragMove(e) {
+  if (!sheetDrag.active) return;
+  var y = sheetTouchY(e);
+  if (y == null) return;
+  var offset = Math.max(0, y - sheetDrag.startY);
+  var now = Date.now();
+  var elapsed = Math.max(1, now - sheetDrag.lastTime);
+  sheetDrag.velocity = (y - sheetDrag.lastY) / elapsed;
+  sheetDrag.lastY = y;
+  sheetDrag.lastTime = now;
+
+  var sheet = document.getElementById('sheet');
+  var overlay = document.getElementById('overlay');
+  var progress = Math.min(1, offset / Math.max(1, sheet.offsetHeight));
+  sheet.style.transform = 'translate3d(0,' + offset + 'px,0)';
+  overlay.style.backgroundColor = 'rgba(0,0,0,' + (0.55 * (1 - progress)) + ')';
+  overlay.style.backdropFilter = 'blur(' + (2 * (1 - progress)) + 'px)';
+  overlay.style.webkitBackdropFilter = 'blur(' + (2 * (1 - progress)) + 'px)';
+  if (e.cancelable) e.preventDefault();
+}
+
+function onSheetDragEnd(e) {
+  if (!sheetDrag.active) return;
+  var y = sheetTouchY(e);
+  if (y == null) y = sheetDrag.lastY;
+  var offset = Math.max(0, y - sheetDrag.startY);
+  var sheet = document.getElementById('sheet');
+  var releaseVelocity = Date.now() - sheetDrag.lastTime > 100 ? 0 : sheetDrag.velocity;
+  var shouldClose = offset > Math.min(180, sheet.offsetHeight * 0.28) ||
+    (offset > 35 && releaseVelocity > 0.65);
+  sheetDrag.active = false;
+  document.getElementById('sheetGrabber').classList.remove('dragging');
+  if (shouldClose) dismissDetailFromDrag();
+  else restoreDraggedSheet();
+}
+
+function restoreDraggedSheet() {
+  if (!sheetDrag.active && !document.getElementById('overlay').classList.contains('open')) return;
+  sheetDrag.active = false;
+  var sheet = document.getElementById('sheet');
+  var overlay = document.getElementById('overlay');
+  document.getElementById('sheetGrabber').classList.remove('dragging');
+  sheet.style.transition = 'transform .28s var(--ease)';
+  overlay.style.transition = 'background-color .28s ease, backdrop-filter .28s ease';
+  sheet.style.transform = 'translate3d(0,0,0)';
+  overlay.style.backgroundColor = '';
+  overlay.style.backdropFilter = '';
+  overlay.style.webkitBackdropFilter = '';
+  sheetDrag.closeTimer = setTimeout(function () {
+    sheetDrag.closeTimer = null;
+    sheet.style.transition = '';
+    sheet.style.transform = '';
+    overlay.style.transition = '';
+  }, 300);
+}
+
+function dismissDetailFromDrag() {
+  var sheet = document.getElementById('sheet');
+  var overlay = document.getElementById('overlay');
+  openTicketNo = null;
+  sheet.style.transition = 'transform .24s cubic-bezier(.4,0,1,1)';
+  overlay.style.transition = 'background-color .24s ease, backdrop-filter .24s ease';
+  sheet.style.transform = 'translate3d(0,' + (sheet.offsetHeight + 30) + 'px,0)';
+  overlay.style.backgroundColor = 'rgba(0,0,0,0)';
+  overlay.style.backdropFilter = 'blur(0)';
+  overlay.style.webkitBackdropFilter = 'blur(0)';
+  sheetDrag.closeTimer = setTimeout(function () {
+    sheetDrag.closeTimer = null;
+    overlay.classList.remove('open');
+    document.documentElement.classList.remove('detail-open');
+    resetSheetDragStyles();
+  }, 250);
 }
 
 function renderDetail(t) {
@@ -1946,6 +2082,14 @@ function closeLightbox() {
 }
 
 // ============================ INIT ============================
+var sheetGrabber = document.getElementById('sheetGrabber');
+sheetGrabber.addEventListener('touchstart', onSheetDragStart, false);
+sheetGrabber.addEventListener('touchmove', onSheetDragMove, false);
+sheetGrabber.addEventListener('touchend', onSheetDragEnd, false);
+sheetGrabber.addEventListener('touchcancel', restoreDraggedSheet, false);
+sheetGrabber.addEventListener('mousedown', onSheetDragStart, false);
+document.addEventListener('mousemove', onSheetDragMove, false);
+document.addEventListener('mouseup', onSheetDragEnd, false);
 document.getElementById('overlay').addEventListener('click', function (e) {
   if (e.target === this) closeDetail();
 });
