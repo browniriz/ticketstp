@@ -253,6 +253,19 @@ def test_apps_script_formula_round_trip_and_dedupe_repair_contract():
     assert "JSON.stringify(current) === JSON.stringify(desired)" in batch
 
 
+def test_apps_script_reserves_sheet_rows_before_ticket_writes():
+    source = (Path(__file__).parents[2] / "Code.gs").read_text(encoding="utf-8")
+    capacity = source[source.index("function ensureSheetRowCapacity_"):
+                      source.index("function rowToTicket_")]
+    assert "sh.getMaxRows()" in capacity
+    assert "sh.insertRowsAfter(maxRows" in capacity
+    assert "ensureSheetRowCapacity_(sh, next + reserve - 1);" in capacity
+    batch = source[source.index("function bridgeBatchUpsertTickets_"):
+                   source.index("function bridgeMirrorAccess_")]
+    assert "nextTicketRow_(sh, pending.length)" in batch
+    assert batch.index("nextTicketRow_(sh, pending.length)") < batch.index(".setValues(")
+
+
 def test_apps_script_init_data_freshness_static_contract():
     source = (Path(__file__).parents[2] / "Code.gs").read_text(encoding="utf-8")
     auth = source[source.index("function verifyInitData_"):source.index("function bytesToHex_")]

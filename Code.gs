@@ -497,7 +497,9 @@ function bridgeBatchUpsertTickets_(rows, sequences, dedupeKeys) {
           sequence: sequence, dedupe: String(dedupeKeys[i]) });
       }
     });
-    var next = nextTicketRow_(sh);
+    // A sheet can be trimmed exactly to its last data row. Reserve the whole
+    // batch before getRange(), otherwise Apps Script throws "range exceeds grid".
+    var next = pending.length ? nextTicketRow_(sh, pending.length) : 0;
     pending.forEach(function (item) {
       item.index = map[String(item.row[0])] || next++;
       map[String(item.row[0])] = item.index;
@@ -1924,15 +1926,27 @@ function writeRow_(sh, rowIdx, row) {
   updateTicketCachesAfterWrite_(row);
 }
 
+function ensureSheetRowCapacity_(sh, requiredLastRow) {
+  var maxRows = sh.getMaxRows();
+  if (requiredLastRow <= maxRows) return;
+  // Grow in chunks so a busy sheet does not require a structural edit for
+  // every new ticket, while still accommodating reconciliation batches.
+  sh.insertRowsAfter(maxRows, Math.max(requiredLastRow - maxRows, 200));
+}
+
 // Номер строки для новой заявки: сразу после последней строки С НОМЕРОМ (столбец A),
-// игнорируя посторонний контент в дальних ячейках других столбцов.
-function nextTicketRow_(sh) {
+// игнорируя посторонний контент в дальних ячейках других столбцов. Сразу
+// резервируем нужное количество строк, если лист был обрезан до данных.
+function nextTicketRow_(sh, rowsNeeded) {
   var last = Math.max(sh.getLastRow(), 1);
   var col = sh.getRange(1, 1, last, 1).getValues();
+  var next = 2;
   for (var i = col.length - 1; i >= 1; i--) {
-    if (col[i][0] !== '' && col[i][0] != null) return i + 2;
+    if (col[i][0] !== '' && col[i][0] != null) { next = i + 2; break; }
   }
-  return 2;
+  var reserve = Math.max(1, Math.ceil(Number(rowsNeeded) || 1));
+  ensureSheetRowCapacity_(sh, next + reserve - 1);
+  return next;
 }
 
 function rowToTicket_(row) {
