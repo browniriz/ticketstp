@@ -52,7 +52,9 @@ async def intents(session, ticket, operation, *, actor_name=""):
         index_elements=[BridgeSequence.entity_key], set_={"version": BridgeSequence.version + 1},
     ).returning(BridgeSequence.version)
     sequence = int((await session.execute(stmt)).scalar_one())
-    key=f"ticket:{ticket.id}:seq{sequence}:{operation}"
+    # Sequence is already unique per ticket. Keeping the bridge identity ASCII
+    # avoids coupling delivery to localized operation labels such as «решена».
+    key=f"ticket:{ticket.id}:seq{sequence}"
     payload={
         "kind":"ticket", "operation":operation, "ticket_id":ticket.id,
         "number":ticket.number, "status":ticket.status, "creator_id":ticket.creator_id,

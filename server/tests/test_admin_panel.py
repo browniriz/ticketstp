@@ -68,6 +68,7 @@ def test_admin_panel_static_route_is_hardened(admin_client):
             and 'id="employeeUsername"' in response.text and 'id="editAccessForm"' in response.text)
     assert 'api("/access"' in response.text and 'loadAccess()' in response.text
     assert 'method:"PATCH"' in response.text
+    assert 'timeZone:"Asia/Yekaterinburg"' in response.text
     assert "localStorage" not in response.text
 
 

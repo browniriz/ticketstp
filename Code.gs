@@ -214,6 +214,13 @@ function doPost(e) {
       return json_({ success: false, error: String(err.message) });
     }
     Logger.log('Внутренняя ошибка: ' + (err && err.stack ? err.stack : err));
+    // Bridge requests already proved possession of the server-only secret.
+    // Return a bounded technical reason so the private worker can classify and
+    // repair sync failures instead of retrying an opaque generic message.
+    if (body && String(body.action || '').indexOf('bridge') === 0 && bridgeSecretValid_(body.bridge_secret)) {
+      var bridgeError = String(err && err.message ? err.message : err || 'unknown bridge error');
+      return json_({ success: false, error: 'bridge: ' + bridgeError.slice(0, 500) });
+    }
     return json_({ success: false, error: 'Внутренняя ошибка сервера. Попробуйте позже.' });
   }
 }
@@ -387,14 +394,18 @@ function canonicalBridgeTicketRow_(row) {
   BRIDGE_TICKET_TEXT_COLUMNS.forEach(function (i) {
     var text = String(row[i] == null ? '' : row[i]);
     // Decode exactly one escape inserted by plainText_; further quotes are data.
-    if (/^'[']*[\s\u0000-\u001f]*[=+\-@]/.test(text)) row[i] = text.slice(1);
+    row[i] = /^'[']*[\s\u0000-\u001f]*[=+\-@]/.test(text) ? text.slice(1) : text;
   });
   return row;
 }
 
 function bridgeStateKey_(prefix, value) {
-  if (!/^[A-Za-z0-9:._-]{1,160}$/.test(String(value || ''))) throw new Error('invalid bridge key');
-  var digest = bytesToHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(value), Utilities.Charset.UTF_8));
+  var text = String(value || '');
+  // The value is hashed before becoming a Script Property key. Permit normal
+  // Unicode operation names (for example «решена»), while bounding input and
+  // rejecting control characters.
+  if (!text || text.length > 160 || /[\u0000-\u001f\u007f]/.test(text)) throw new Error('invalid bridge key');
+  var digest = bytesToHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, text, Utilities.Charset.UTF_8));
   return prefix + digest;
 }
 

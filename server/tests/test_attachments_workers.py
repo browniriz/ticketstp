@@ -152,3 +152,24 @@ async def test_sheet_worker_mismatched_ack_remains_pending(app,client):
         rows=list((await s.execute(select(SheetSyncOutbox))).scalars())
         assert rows and all(not row.delivered for row in rows)
         assert all('mismatched ticket bridge acknowledgment' in row.last_error for row in rows)
+
+
+class NewerSnapshotBridge(FakeBridge):
+    async def call(self, action, **payload):
+        if action == 'bridgeUpsertTicket' and payload['sequence'] == 1:
+            raise RuntimeError('bridge: stale ticket sequence')
+        return await super().call(action, **payload)
+
+
+@pytest.mark.asyncio
+async def test_newer_ticket_snapshot_supersedes_failed_older_intents(app, client):
+    await add_role(app, 1, 'Иван')
+    await add_role(app, 2, 'Админ', 'админ')
+    ticket = call(client, 'createTicket', 1, **BASE)['data']['ticket']
+    assert call(client, 'takeTicket', 2, number=ticket['number'])['success']
+    await WorkerManager(app.state.db, app.state.settings, bridge=NewerSnapshotBridge()).sheets_once()
+    async with app.state.db.session() as session:
+        rows = list((await session.execute(select(SheetSyncOutbox).order_by(
+            SheetSyncOutbox.id))).scalars())
+        assert len(rows) == 2
+        assert all(row.delivered and not row.last_error for row in rows)

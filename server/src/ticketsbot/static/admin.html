@@ -99,7 +99,7 @@
   const $ = id => document.getElementById(id);
   const terminalStatuses = new Set(["решена", "отклонена"]);
   const eventNames = {created:"Создана",take:"Взята в работу",pause:"Поставлена на паузу",resume:"Возобновлена",return:"Отправлена на доработку",resubmit:"Исправлена",finish:"Решена",reject:"Отклонена",transfer:"Передана"};
-  const formatDate = value => { if (!value) return "—"; const date = new Date(value); return Number.isNaN(date.valueOf()) ? String(value) : new Intl.DateTimeFormat("ru-RU",{dateStyle:"medium",timeStyle:"short"}).format(date); };
+  const formatDate = value => { if (!value) return "—"; const date = new Date(value); return Number.isNaN(date.valueOf()) ? String(value) : new Intl.DateTimeFormat("ru-RU",{dateStyle:"medium",timeStyle:"short",timeZone:"Asia/Yekaterinburg"}).format(date); };
   const formatBytes = bytes => { const n=Number(bytes); if(!Number.isFinite(n)) return "—"; if(n<1024)return `${n} Б`; if(n<1048576)return `${(n/1024).toFixed(1)} КБ`; return `${(n/1048576).toFixed(1)} МБ`; };
   const text = value => value === null || value === undefined || value === "" ? "—" : String(value);
   const escapeHtml = value => text(value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));

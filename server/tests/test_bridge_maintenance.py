@@ -251,6 +251,18 @@ def test_apps_script_formula_round_trip_and_dedupe_repair_contract():
     batch = source[source.index("function bridgeBatchUpsertTickets_"):source.index("function bridgeMirrorAccess_")]
     assert "currentMatches" in batch
     assert "JSON.stringify(current) === JSON.stringify(desired)" in batch
+    assert "row[i] = /^'[']*" in formula and ": text;" in formula
+
+
+def test_apps_script_bridge_keys_accept_bounded_unicode():
+    source = (Path(__file__).parents[2] / "Code.gs").read_text(encoding="utf-8")
+    key = source[source.index("function bridgeStateKey_"):
+                 source.index("function validateBridgeTicketRow_")]
+    assert "text.length > 160" in key
+    assert "\\u0000-\\u001f\\u007f" in key
+    assert "A-Za-z0-9" not in key
+    tickets = (Path(__file__).parents[1] / "src" / "ticketsbot" / "services" / "tickets.py").read_text(encoding="utf-8")
+    assert 'key=f"ticket:{ticket.id}:seq{sequence}"' in tickets
 
 
 def test_apps_script_reserves_sheet_rows_before_ticket_writes():
@@ -275,3 +287,11 @@ def test_apps_script_init_data_freshness_static_contract():
     setup = source[source.index("function setupSecrets"):source.index("// ============================ SHEETS")]
     assert "INIT_DATA_MAX_AGE_SECONDS: ''" in setup
     assert "INIT_DATA_FUTURE_SKEW_SECONDS: ''" in setup
+
+
+def test_authenticated_bridge_receives_bounded_internal_error_reason():
+    source = (Path(__file__).parents[2] / "Code.gs").read_text(encoding="utf-8")
+    handler = source[source.index("function doPost"):source.index("function json_")]
+    assert "bridgeSecretValid_(body.bridge_secret)" in handler
+    assert "bridgeError.slice(0, 500)" in handler
+    assert "error: 'bridge: ' +" in handler

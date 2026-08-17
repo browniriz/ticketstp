@@ -181,7 +181,10 @@ class WorkerManager:
                             or str(ack.get("dedupe_key", "")) != dedupe_key):
                         raise RuntimeError("mismatched access bridge acknowledgment")
             except Exception as exc: await self._finish(SheetSyncOutbox, row_id, token, exc)
-            else: await self._finish(SheetSyncOutbox, row_id, token)
+            else:
+                await self._finish(SheetSyncOutbox, row_id, token)
+                if entity_type == "ticket":
+                    await self._supersede_ticket_rows(entity_id, sequence)
 
     async def _claim(self, model):
         """Atomically lease due rows, committing before any network operation."""
@@ -223,6 +226,29 @@ class WorkerManager:
             message = f"permanently failed after {row.attempts} attempts: {message}"
         row.last_error = message[:2000]
         row.next_attempt_at = utcnow() + timedelta(seconds=min(3600, max(30, 2 ** min(row.attempts, 11))))
+
+    async def _supersede_ticket_rows(self, entity_id: str, delivered_sequence: int):
+        """A newer full snapshot safely satisfies every older ticket intent."""
+        async with self.db.session() as session:
+            rows = list((await session.execute(select(SheetSyncOutbox).where(
+                SheetSyncOutbox.entity_type == "ticket",
+                SheetSyncOutbox.entity_id == str(entity_id),
+                SheetSyncOutbox.delivered.is_(False),
+            ))).scalars())
+            delivered_at = utcnow()
+            for row in rows:
+                try:
+                    sequence = json.loads(row.payload_json).get("sequence")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if (isinstance(sequence, int) and not isinstance(sequence, bool)
+                        and sequence <= delivered_sequence):
+                    row.delivered = True
+                    row.delivered_at = delivered_at
+                    row.last_error = ""
+                    row.claimed_at = None
+                    row.claim_token = ""
+            await session.commit()
 
     async def pull_roles_once(self):
         data = await self.bridge.call("bridgePullRoles")
