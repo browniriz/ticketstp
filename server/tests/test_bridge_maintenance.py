@@ -229,6 +229,8 @@ def test_apps_script_bridge_and_role_revision_static_contract():
     assert delete.index("invalidateTicketCache_(); invalidateRowMap_();") < delete.index("absent: !buildRowMap_(sh)[number]")
     mirror = source[source.index("function bridgeMirrorAccess_"):source.index("// Прогон проверки")]
     assert "bumpRolesRevision_();" not in mirror
+    assert "operation === 'update'" in mirror and "replaceContacts" in source
+    assert "payload.allowed_types" in mirror
     boundaries = (("upsertRole_", "function updateRoleContact_"),
                   ("updateRoleContact_", "// ============================ TICKETS"),
                   ("removeRole_", "// Ручные изменения"))

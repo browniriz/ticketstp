@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import unicodedata
 from datetime import timezone
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -33,6 +35,7 @@ class DeleteBody(BaseModel):
 class AddEmployeeBody(BaseModel):
     tg_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
     name: str = Field(min_length=1, max_length=80)
+    username: str = Field(default="", max_length=33)
 
     @field_validator("tg_id")
     @classmethod
@@ -49,6 +52,20 @@ class AddEmployeeBody(BaseModel):
                 or any(unicodedata.category(char).startswith("C") for char in value)):
             raise ValueError("Employee name contains unsupported characters")
         return value
+
+    @field_validator("username")
+    @classmethod
+    def valid_username(cls, value: str) -> str:
+        value = unicodedata.normalize("NFKC", value).strip()
+        if value.startswith("@"):
+            value = value[1:]
+        if value and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", value):
+            raise ValueError("Telegram username is invalid")
+        return value
+
+
+class EditEmployeeBody(AddEmployeeBody):
+    role: Literal["сотрудник", "админ"]
 
 
 def value(value):
@@ -150,10 +167,10 @@ async def access_list(request: Request, q: str = "", page: int = 1, page_size: i
 @router.post("/access", status_code=201)
 async def add_employee(body: AddEmployeeBody, request: Request,
                        admin: AdminSession = Depends(require_admin_state_change)):
-    tg_id, name = body.tg_id, body.name
+    tg_id, name, username = body.tg_id, body.name, body.username
     async with request.app.state.db.session() as session:
         inserted = (await session.execute(insert(Role).values(
-            tg_id=tg_id, name=name, role="сотрудник", username="", photo_url="",
+            tg_id=tg_id, name=name, role="сотрудник", username=username, photo_url="",
             allowed_types_json=None,
         ).on_conflict_do_nothing(index_elements=[Role.tg_id]).returning(Role.tg_id))).scalar_one_or_none()
         if inserted is None:
@@ -162,15 +179,61 @@ async def add_employee(body: AddEmployeeBody, request: Request,
         await session.execute(delete(AccessRequest).where(AccessRequest.tg_id == tg_id))
         event_key = f"role:{tg_id}:admin-approve:{uuid4().hex}"
         await _sheet_access(session, event_key, "role", tg_id, "approve", {
-            "tg_id": tg_id, "name": name, "role": "сотрудник", "username": "", "photo_url": "",
+            "tg_id": tg_id, "name": name, "role": "сотрудник", "username": username, "photo_url": "",
         })
         session.add(AdminAudit(session_id=admin.id, action="add_employee_access",
                                payload_json=json.dumps({"tg_id": tg_id, "name": name,
-                                                        "role": "сотрудник"},
+                                                        "role": "сотрудник", "username": username},
                                                        ensure_ascii=False, separators=(",", ":"))))
         await session.commit()
-    return {"employee": {"tg_id": tg_id, "name": name, "role": "сотрудник", "username": ""},
+    return {"employee": {"tg_id": tg_id, "name": name, "role": "сотрудник", "username": username},
             "google_pending": True}
+
+
+@router.patch("/access/{current_tg_id}")
+async def edit_employee(current_tg_id: str, body: EditEmployeeBody, request: Request,
+                        admin: AdminSession = Depends(require_admin_state_change)):
+    new_tg_id, name, username, role_name = body.tg_id, body.name, body.username, body.role
+    async with request.app.state.db.session() as session:
+        role = await session.get(Role, current_tg_id)
+        if role is None:
+            raise HTTPException(404, "Запись доступа не найдена")
+        if new_tg_id != current_tg_id and await session.get(Role, new_tg_id) is not None:
+            raise HTTPException(409, "Для нового Telegram ID уже существует доступ")
+        if role.role == "админ" and role_name != "админ":
+            admin_count = int((await session.execute(select(func.count(Role.tg_id)).where(
+                Role.role == "админ"))).scalar_one())
+            if admin_count <= 1:
+                raise HTTPException(409, "Нельзя понизить роль последнего администратора")
+
+        old = {"tg_id": role.tg_id, "name": role.name, "role": role.role,
+               "username": role.username}
+        try:
+            allowed_types = json.loads(role.allowed_types_json) if role.allowed_types_json else None
+        except (TypeError, ValueError):
+            allowed_types = None
+        role.tg_id = new_tg_id
+        role.name = name
+        role.username = username
+        role.role = role_name
+        await session.execute(delete(AccessRequest).where(AccessRequest.tg_id == new_tg_id))
+
+        payload = {"tg_id": new_tg_id, "name": name, "role": role_name,
+                   "username": username, "photo_url": role.photo_url}
+        if isinstance(allowed_types, list):
+            payload["allowed_types"] = allowed_types
+        await _sheet_access(session, f"role:{new_tg_id}:admin-update:{uuid4().hex}",
+                            "role", new_tg_id, "update", payload)
+        if new_tg_id != current_tg_id:
+            await _sheet_access(session, f"role:{current_tg_id}:admin-revoke:{uuid4().hex}",
+                                "role", current_tg_id, "revoke", {"tg_id": current_tg_id})
+        employee = {"tg_id": new_tg_id, "name": name, "role": role_name,
+                    "username": username}
+        session.add(AdminAudit(session_id=admin.id, action="edit_employee_access",
+                               payload_json=json.dumps({"before": old, "after": employee},
+                                                       ensure_ascii=False, separators=(",", ":"))))
+        await session.commit()
+    return {"employee": employee, "google_pending": True}
 
 
 @router.get("/tickets/{number}")
