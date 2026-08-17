@@ -64,8 +64,10 @@ def test_admin_panel_static_route_is_hardened(admin_client):
     assert response.headers["x-content-type-options"] == "nosniff"
     assert '<html lang="ru">' in response.text
     assert 'const API = "/admin/api"' in response.text and 'API+"/session"' in response.text
-    assert 'id="accessTab"' in response.text and 'id="addAccessForm"' in response.text
+    assert ('id="accessTab"' in response.text and 'id="addAccessForm"' in response.text
+            and 'id="employeeUsername"' in response.text and 'id="editAccessForm"' in response.text)
     assert 'api("/access"' in response.text and 'loadAccess()' in response.text
+    assert 'method:"PATCH"' in response.text
     assert "localStorage" not in response.text
 
 
@@ -216,25 +218,28 @@ async def test_access_list_search_and_add_employee_are_audited(admin_app):
         assert client.get("/admin/api/access", params={"q": "200"}).json()["items"][0]["name"] == "Борис"
         assert client.get("/admin/api/access", params={"q": "ANNA"}).json()["items"][0]["tg_id"] == "100"
         assert client.get("/admin/api/access", params={"q": "%"}).json()["total"] == 0
-        created = client.post("/admin/api/access", json={"tg_id": "300", "name": "Светлана"},
+        created = client.post("/admin/api/access", json={"tg_id": "300", "name": "Светлана",
+                                                          "username": "@svetlana_1"},
                               headers=csrf_headers(csrf))
         assert created.status_code == 201
         assert created.json()["employee"] == {"tg_id": "300", "name": "Светлана",
-                                                "role": "сотрудник", "username": ""}
+                                                "role": "сотрудник", "username": "svetlana_1"}
         assert created.json()["google_pending"] is True
         assert client.post("/admin/api/access", json={"tg_id": "300", "name": "Дубликат"},
                            headers=csrf_headers(csrf)).status_code == 409
     async with admin_app.state.db.session() as session:
         role = await session.get(Role, "300")
-        assert role is not None and role.role == "сотрудник" and role.name == "Светлана"
+        assert (role is not None and role.role == "сотрудник" and role.name == "Светлана"
+                and role.username == "svetlana_1")
         outbox = (await session.execute(select(SheetSyncOutbox).where(
             SheetSyncOutbox.entity_type == "role", SheetSyncOutbox.entity_id == "300"))).scalar_one()
         assert outbox.operation == "approve"
         assert json.loads(outbox.payload_json)["role"] == "сотрудник"
+        assert json.loads(outbox.payload_json)["username"] == "svetlana_1"
         audit = (await session.execute(select(AdminAudit).where(
             AdminAudit.action == "add_employee_access"))).scalar_one()
         assert json.loads(audit.payload_json) == {"tg_id": "300", "name": "Светлана",
-                                                  "role": "сотрудник"}
+                                                  "role": "сотрудник", "username": "svetlana_1"}
 
 
 def test_add_employee_access_requires_csrf_and_valid_fields(admin_client):
@@ -247,6 +252,72 @@ def test_add_employee_access_requires_csrf_and_valid_fields(admin_client):
                                  headers=csrf_headers(csrf)).status_code == 422
     assert admin_client.post("/admin/api/access", json={"tg_id": "123", "name": "ﷺ" * 80},
                              headers=csrf_headers(csrf)).status_code == 422
+    for username in ("@four", "1username", "user-name", "@" + "a" * 33):
+        assert admin_client.post("/admin/api/access", json={"tg_id": "123", "name": "Иван",
+                                                            "username": username},
+                                 headers=csrf_headers(csrf)).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_edit_access_updates_every_field_and_queues_google_sync(admin_app):
+    await admin_app.state.db.initialize()
+    async with admin_app.state.db.session() as session:
+        session.add_all([
+            Role(tg_id="100", name="Администратор", role="админ", username="admin"),
+            Role(tg_id="200", name="Старое имя", role="сотрудник", username="old_name",
+                 photo_url="https://example.test/photo.jpg", allowed_types_json='["Касса"]'),
+        ])
+        await session.commit()
+    with TestClient(admin_app, base_url="https://testserver") as client:
+        csrf = login(client).json()["csrf_token"]
+        response = client.patch("/admin/api/access/200", json={
+            "tg_id": "300", "name": "Новое имя", "username": "@new_name", "role": "админ",
+        }, headers=csrf_headers(csrf))
+        assert response.status_code == 200
+        assert response.json()["employee"] == {
+            "tg_id": "300", "name": "Новое имя", "username": "new_name", "role": "админ",
+        }
+        assert response.json()["google_pending"] is True
+    async with admin_app.state.db.session() as session:
+        assert await session.get(Role, "200") is None
+        role = await session.get(Role, "300")
+        assert (role is not None and role.name == "Новое имя" and role.username == "new_name"
+                and role.role == "админ" and role.allowed_types_json == '["Касса"]')
+        outbox = list((await session.execute(select(SheetSyncOutbox).where(
+            SheetSyncOutbox.entity_type == "role").order_by(SheetSyncOutbox.id))).scalars())
+        assert [row.operation for row in outbox] == ["update", "revoke"]
+        update_payload = json.loads(outbox[0].payload_json)
+        assert update_payload["tg_id"] == "300" and update_payload["allowed_types"] == ["Касса"]
+        assert json.loads(outbox[1].payload_json)["tg_id"] == "200"
+        audit = (await session.execute(select(AdminAudit).where(
+            AdminAudit.action == "edit_employee_access"))).scalar_one()
+        payload = json.loads(audit.payload_json)
+        assert payload["before"] == {"tg_id": "200", "name": "Старое имя",
+                                     "role": "сотрудник", "username": "old_name"}
+        assert payload["after"] == response.json()["employee"]
+
+
+@pytest.mark.asyncio
+async def test_edit_access_validates_conflicts_csrf_and_last_admin(admin_app):
+    await admin_app.state.db.initialize()
+    async with admin_app.state.db.session() as session:
+        session.add_all([
+            Role(tg_id="100", name="Единственный админ", role="админ", username="admin"),
+            Role(tg_id="200", name="Сотрудник", role="сотрудник", username="employee"),
+        ])
+        await session.commit()
+    body = {"tg_id": "200", "name": "Сотрудник", "username": "employee", "role": "сотрудник"}
+    with TestClient(admin_app, base_url="https://testserver") as client:
+        csrf = login(client).json()["csrf_token"]
+        assert client.patch("/admin/api/access/200", json=body).status_code == 403
+        conflict = {**body, "tg_id": "100"}
+        assert client.patch("/admin/api/access/200", json=conflict,
+                            headers=csrf_headers(csrf)).status_code == 409
+        demotion = {**body, "tg_id": "100"}
+        assert client.patch("/admin/api/access/100", json=demotion,
+                            headers=csrf_headers(csrf)).status_code == 409
+        assert client.patch("/admin/api/access/999", json=body,
+                            headers=csrf_headers(csrf)).status_code == 404
 
 
 @pytest.mark.asyncio

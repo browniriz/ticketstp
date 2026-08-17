@@ -541,6 +541,13 @@ function bridgeMirrorAccess_(body) {
     } else if (operation === 'approve') {
       upsertRole_(id, plainText_(String(payload.name || '').slice(0, 80)), 'сотрудник', plainText_(String(payload.username || '').slice(0, 64)), plainText_(String(payload.photo_url || '').slice(0, 1000)));
       removeRequest_(id);
+    } else if (operation === 'update') {
+      var updatedRole = String(payload.role || '');
+      if (updatedRole !== 'сотрудник' && updatedRole !== 'админ') throw new Error('invalid role');
+      upsertRole_(id, plainText_(String(payload.name || '').slice(0, 80)), updatedRole,
+        plainText_(String(payload.username || '').slice(0, 64)),
+        plainText_(String(payload.photo_url || '').slice(0, 1000)), true, payload.allowed_types);
+      removeRequest_(id);
     } else if (operation === 'rename') {
       var current = getRoleRaw_(id);
       if (current.role === 'гость') throw new Error('role not found');
@@ -1005,24 +1012,28 @@ function assertTicketTypeAllowed_(tgId, type) {
   }
 }
 
-function upsertRole_(tgId, name, role, username, photo) {
+function upsertRole_(tgId, name, role, username, photo, replaceContacts, allowedTypes) {
   name = plainText_(name); username = plainText_(username); photo = plainText_(photo);
   var sh = sheet_(SHEET_ROLES);
   var rows = sh.getDataRange().getValues();
+  var typeFlags = Array.isArray(allowedTypes) ? TICKET_TYPES.map(function (type) {
+    return allowedTypes.indexOf(type) !== -1;
+  }) : null;
   var updated = false;
   for (var i = 1; i < rows.length; i++) {
     if (String(rows[i][0]) === String(tgId)) {
       // Контакты не затираем пустыми — сохраняем прежние, если новые не переданы.
-      var u = (username != null && username !== '') ? username : (rows[i][3] || '');
-      var p = (photo != null && photo !== '') ? photo : (rows[i][4] || '');
+      var u = replaceContacts ? username : ((username != null && username !== '') ? username : (rows[i][3] || ''));
+      var p = replaceContacts ? photo : ((photo != null && photo !== '') ? photo : (rows[i][4] || ''));
       sh.getRange(i + 1, 1, 1, 5).setValues([[tgId, name, role, u, p]]);
+      if (typeFlags) sh.getRange(i + 1, 6, 1, typeFlags.length).setValues([typeFlags]);
       updated = true;
       break;
     }
   }
   if (!updated) {
     var newRow = [tgId, name, role, username || '', photo || '']
-      .concat(defaultRoleTypeFlags_(role, tgId, false));
+      .concat(typeFlags || defaultRoleTypeFlags_(role, tgId, false));
     sh.appendRow(newRow);
   }
   CacheService.getScriptCache().remove(CACHE_KEY_ROLES);
