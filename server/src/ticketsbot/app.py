@@ -145,10 +145,12 @@ def create_app(settings: Settings | None = None, telegram_client=None, sheet_cli
         expires = int(time.time()) + settings.media_url_ttl_seconds
         signature = media_signature(settings.bot_token, token, str(actor.id), expires)
         url = settings.public_base_url.rstrip("/") + f"/media/{token}?user={actor.id}&expires={expires}&sig={signature}"
-        return {"url": url, "expires": expires}
+        if attachment.mime_type.startswith("image/"):
+            url += "&inline=1"
+        return {"url": url, "expires": expires, "mimeType": attachment.mime_type}
 
     @app.get("/media/{token}")
-    async def media(token: str, user: str = "", expires: int = 0, sig: str = ""):
+    async def media(token: str, user: str = "", expires: int = 0, sig: str = "", inline: bool = False):
         now = int(time.time())
         if expires < now or expires > now + settings.media_url_ttl_seconds + 5:
             raise HTTPException(404)
@@ -170,7 +172,9 @@ def create_app(settings: Settings | None = None, telegram_client=None, sheet_cli
                 raise HTTPException(404)
             if not path.is_file():
                 raise HTTPException(404)
+            disposition = "inline" if inline and attachment.mime_type.startswith("image/") else "attachment"
             return FileResponse(path, media_type=attachment.mime_type, filename=attachment.original_name,
+                                content_disposition_type=disposition,
                                 headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
     app.include_router(router)

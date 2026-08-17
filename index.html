@@ -665,13 +665,13 @@ function api(action, payload) {
   });
 }
 
-// Obtain a short-lived attachment URL without ever placing Telegram initData in a URL.
-function secureMediaUrl(url) {
+// Obtain a short-lived attachment session without ever placing Telegram initData in a URL.
+function secureMediaSession(url) {
   if (!/^https?:\/\//i.test(url)) return Promise.reject(new Error('Некорректная ссылка'));
   var parsed;
   try { parsed = new URL(url); } catch (e) { return Promise.reject(e); }
   var match = parsed.pathname.match(/\/media\/([^/]+)$/);
-  if (!match) return Promise.resolve(url); // External/legacy (for example Google Drive).
+  if (!match) return Promise.resolve({ url: url, mimeType: '' }); // External/legacy (for example Google Drive).
   var mediaBasePath = parsed.pathname.replace(/\/media\/[^/]+$/, '');
   return fetch(parsed.origin + mediaBasePath + '/media/session', {
     method: 'POST',
@@ -684,8 +684,11 @@ function secureMediaUrl(url) {
     if (!data || !/^https?:\/\//i.test(data.url) || /(?:[?&])init_data=/i.test(data.url)) {
       throw new Error('Сервер вернул некорректную ссылку.');
     }
-    return data.url;
+    return { url: data.url, mimeType: String(data.mimeType || '') };
   });
+}
+function secureMediaUrl(url) {
+  return secureMediaSession(url).then(function (session) { return session.url; });
 }
 function openSecureFile(url) {
   secureMediaUrl(url).then(function (signedUrl) {
@@ -1526,6 +1529,8 @@ function renderDetail(t) {
     '<input type="file" id="detail-image" data-no="' + no + '" style="display:none" onchange="onDetailImage(this.dataset.no)" />' +
     '<div id="actionPanel"></div>';
 
+  loadProtectedPreview(t.fileUrl);
+
   lastDetailNo = t.number;
   lastDetailSig = detailSig(t);
 }
@@ -1557,10 +1562,32 @@ function fileHTML(t) {
   return '<div class="shot-wrap">' +
     (thumb ? '<img class="shot clickable" src="' + esc(thumb) + '" alt="вложение" ' +
       'data-full="' + esc(full) + '" onclick="openLightbox(this.dataset.full)" ' +
-      'onerror="this.style.display=\'none\'" />' : '') +
+      'onerror="this.style.display=\'none\'" />' :
+      (isProtected ? '<img class="shot clickable protected-preview" alt="вложение" ' +
+        'data-media-url="' + esc(t.fileUrl) + '" data-full="' + esc(t.fileUrl) + '" ' +
+        'onclick="openLightbox(this.dataset.full)" style="display:none" />' : '')) +
     '<a class="file-chip" href="#" data-url="' + esc(t.fileUrl) + '" onclick="return openSecureFile(this.dataset.url)">' +
       '<span class="ico">📎</span><span class="nm">Открыть файл</span></a>' +
     '</div>';
+}
+
+// Protected files need an authorized, short-lived URL before an image can be shown.
+// Non-images and failed previews silently keep the regular "Open file" fallback.
+function loadProtectedPreview(url) {
+  if (!/\/media\/[^/?]+(?:\?|$)/.test(url || '')) return;
+  var img = document.querySelector('#detailBody .protected-preview');
+  if (!img || img.getAttribute('data-media-url') !== url) return;
+  secureMediaSession(url).then(function (session) {
+    if (!/^image\//i.test(session.mimeType)) return;
+    if (!img.parentNode || img.getAttribute('data-media-url') !== url) return;
+    img.onload = function () {
+      if (img.parentNode && img.getAttribute('data-media-url') === url) img.style.display = '';
+    };
+    img.onerror = function () { img.style.display = 'none'; };
+    img.src = session.url;
+  }).catch(function () {
+    // Preview is optional; the authenticated file button remains available.
+  });
 }
 
 function row(k, v) { return '<div class="detail-row"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'; }

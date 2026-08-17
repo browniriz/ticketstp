@@ -25,8 +25,10 @@ async def test_attachment_create_authorized_download_and_replace(app,client,tmp_
     assert client.get('/media/'+token).status_code==404
     session=client.post('/media/session',json={'token':token,'init_data':signed(1)})
     assert session.status_code==200 and 'init_data' not in session.json()['url']
+    assert session.json()['mimeType']=='image/png' and 'inline=1' in session.json()['url']
     response=client.get(session.json()['url'])
     assert response.status_code==200 and response.content==b'png-data' and response.headers['x-content-type-options']=='nosniff'
+    assert response.headers['content-disposition'].startswith('inline;')
     replaced=call(client,'addScreenshot',2,number=ticket['number'],image=image,filename='new.png')
     assert replaced['success'] and replaced['data']['ticket']['fileUrl']!=ticket['fileUrl']
     assert client.get(session.json()['url']).status_code==404
