@@ -707,6 +707,18 @@ function openSecureFile(url) {
   }).catch(function (e) { toast(e.message, true); });
   return false;
 }
+function openImageWindow(url) {
+  secureMediaUrl(url).then(function (signedUrl) {
+    // Telegram keeps the Mini App open underneath the external browser.
+    if (tg && tg.openLink) {
+      tg.openLink(signedUrl);
+      return;
+    }
+    var w = window.open(signedUrl, '_blank', 'noopener');
+    if (!w) showLightbox(signedUrl);
+  }).catch(function (e) { toast(e.message, true); });
+  return false;
+}
 
 // ============================ THEME ============================
 var themeInited = false;
@@ -1686,7 +1698,7 @@ function reasonHTML(t) {
   return '';
 }
 
-// Вложение: миниатюра (тап → лайтбокс внутри приложения) + ссылка-запасной вариант.
+// Вложение: миниатюра (тап → отдельное окно) + ссылка-запасной вариант.
 function fileHTML(t) {
   if (!t.fileUrl) return '';
   // Рендерим только http(s)-ссылки — защита от javascript:/data: при ручной правке таблицы.
@@ -1697,11 +1709,11 @@ function fileHTML(t) {
   var full  = id ? 'https://drive.google.com/thumbnail?id=' + id + '&sz=w2000' : t.fileUrl;
   return '<div class="shot-wrap">' +
     (thumb ? '<img class="shot clickable" src="' + esc(thumb) + '" alt="вложение" ' +
-      'data-full="' + esc(full) + '" onclick="openLightbox(this.dataset.full)" ' +
+      'data-full="' + esc(full) + '" onclick="openImageWindow(this.dataset.full)" ' +
       'onerror="this.style.display=\'none\'" />' :
       (isProtected ? '<img class="shot clickable protected-preview" alt="вложение" ' +
         'data-media-url="' + esc(t.fileUrl) + '" data-full="' + esc(t.fileUrl) + '" ' +
-        'onclick="openLightbox(this.dataset.full)" style="display:none" />' : '')) +
+        'onclick="openImageWindow(this.dataset.full)" style="display:none" />' : '')) +
     '<a class="file-chip" href="#" data-url="' + esc(t.fileUrl) + '" onclick="return openSecureFile(this.dataset.url)">' +
       '<span class="ico">📎</span><span class="nm">Открыть файл</span></a>' +
     '</div>';
