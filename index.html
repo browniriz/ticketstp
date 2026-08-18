@@ -2069,9 +2069,14 @@ function toast(msg, isErr) {
 // ============================ LIGHTBOX ============================
 function openLightbox(url) {
   if (/\/media\/[^/?]+(?:\?|$)/.test(url)) {
-    secureMediaUrl(url).then(openLightbox).catch(function (e) { toast(e.message, true); });
+    // Do not feed the signed /media/... URL back into openLightbox: it has the
+    // same path as the protected URL and would start another signing request.
+    secureMediaUrl(url).then(showLightbox).catch(function (e) { toast(e.message, true); });
     return;
   }
+  showLightbox(url);
+}
+function showLightbox(url) {
   var img = document.getElementById('lightboxImg');
   img.src = url;
   document.getElementById('lightbox').classList.add('open');
